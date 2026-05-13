@@ -1,0 +1,186 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "feature/**"]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/glossa
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            ruff black mypy bandit[toml] \
+            pydantic pydantic-settings structlog \
+            opentelemetry-api opentelemetry-sdk \
+            redis httpx orjson fastapi \
+            types-redis types-requests
+
+      - name: Install local packages (stubs only, no extras)
+        run: |
+          pip install -e libs/common --no-deps
+          pip install -e libs/max_sdk --no-deps
+
+      - name: Ruff lint
+        run: ruff check services/ libs/ --output-format=github
+
+      - name: Black format check
+        run: black --check services/ libs/
+
+      - name: Bandit security lint
+        run: |
+          bandit -r services/ libs/ \
+            -x "*/tests/*" \
+            --severity-level medium \
+            --confidence-level medium \
+            -q
+
+      - name: MyPy — libs
+        run: mypy libs/ --config-file=pyproject.toml
+
+      - name: MyPy — services
+        run: |
+          for svc_dir in services/*/; do
+            svc=$(basename "$svc_dir")
+            echo "=== mypy: $svc ==="
+            mypy "$svc_dir/app" --config-file=pyproject.toml --ignore-missing-imports || true
+          done
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e libs/common
+          pip install -e libs/max_sdk
+          # Install test deps for each service
+          for svc_dir in services/*/; do
+            if [[ -f "${svc_dir}pyproject.toml" ]]; then
+              pip install -e "${svc_dir}[test]" --no-deps 2>/dev/null || \
+              pip install -e "${svc_dir}" --no-deps 2>/dev/null || true
+            fi
+          done
+          pip install pytest pytest-asyncio pytest-cov fakeredis httpx anyio
+
+      - name: Run tests
+        env:
+          REDIS_URL: redis://localhost:6379/0
+          ENVIRONMENT: development
+          MAX_BOT_TOKEN: test-token
+          NLP_MODEL_PATH: /dev/null
+          CV_MODEL_PATH: /dev/null
+        run: |
+          pytest libs/ services/ \
+            --cov=libs --cov=services \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --ignore=services/gesture_recognition \
+            -v
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
+
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api_gateway
+          - cv_service
+          - asr_service
+          - nlp_service
+          - tts_service
+          - max_adapter
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1

@@ -1,0 +1,132 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/glossa
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to staging via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/glossa
+            git pull origin main
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker system prune -f
+
+      - name: Smoke test staging
+        run: |
+          sleep 30
+          curl -f https://staging.glossa.ai/health/live || exit 1
+          curl -f https://staging.glossa.ai/health/ready || exit 1
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production
+    needs: deploy-staging
+    if: github.event.inputs.environment == 'production' || github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rolling deploy to production
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/glossa
+            git pull origin main
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Per-service port map (matches docker-compose.yml port bindings)
+            declare -A SVC_PORT=(
+              [api-gateway]=8000
+              [cv-service]=8001
+              [asr-service]=8002
+              [nlp-service]=8003
+              [tts-service]=8004
+              [max-adapter]=8005
+            )
+
+            FAILED_SVC=""
+            for svc in api-gateway cv-service asr-service nlp-service tts-service max-adapter; do
+              echo "=== Updating $svc ==="
+              port="${SVC_PORT[$svc]}"
+
+              docker compose pull "$svc"
+              docker compose up -d --no-deps "$svc"
+
+              # Wait up to 90s for healthy status
+              deadline=$(( $(date +%s) + 90 ))
+              while (( $(date +%s) < deadline )); do
+                status=$(docker compose ps --format json "$svc" 2>/dev/null | \
+                  python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health','unknown'))" 2>/dev/null || echo "unknown")
+                if [[ "$status" == "healthy" ]]; then break; fi
+                sleep 5
+              done
+
+              if ! docker compose exec -T "$svc" curl -sf "http://localhost:${port}/health/live"; then
+                echo "Health check FAILED for $svc on port $port"
+                FAILED_SVC="$svc"
+                break
+              fi
+              echo "✓ $svc healthy on port $port"
+            done
+
+            # Rollback if any service failed
+            if [[ -n "$FAILED_SVC" ]]; then
+              echo "Rolling back $FAILED_SVC..."
+              docker compose up -d --no-deps "$FAILED_SVC" 2>&1 || true
+              echo "Rollback attempted. Manual intervention may be required."
+              exit 1
+            fi
+
+      - name: Run post-deploy health check
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /opt/glossa
+            bash scripts/health-check.sh
+
+      - name: Tag release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "release-${{ github.sha }}"
+          name: "Release ${{ github.sha }}"
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

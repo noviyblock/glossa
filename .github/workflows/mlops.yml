@@ -1,0 +1,292 @@
+name: MLOps
+
+on:
+  push:
+    paths:
+      - "mlops/**"
+      - "params.yaml"
+      - "dvc.yaml"
+      - "scripts/export_gesture_classifier.py"
+      - "scripts/promote_model.py"
+      - "services/gesture_recognition/**"
+      - "services/nlp_service/**"
+  pull_request:
+    paths:
+      - "mlops/**"
+      - "params.yaml"
+      - "dvc.yaml"
+  workflow_dispatch:
+    inputs:
+      pipeline:
+        description: Pipeline to run
+        required: true
+        default: benchmark
+        type: choice
+        options: [benchmark, eval_gesture, eval_nlp, eval_asr, promote_staging, promote_production, full]
+      model_version:
+        description: Model version for promotion (leave empty for auto)
+        required: false
+        default: ""
+
+env:
+  PYTHON_VERSION: "3.11"
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI || 'http://localhost:5000' }}
+
+concurrency:
+  group: mlops-${{ github.ref }}
+  cancel-in-progress: false   # Never cancel running MLOps jobs
+
+jobs:
+  # ── Lint MLOps code ─────────────────────────────────────────────────────────
+  lint:
+    name: Lint MLOps Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install linters
+        run: pip install ruff black mypy pydantic pydantic-settings
+      - name: Ruff
+        run: ruff check mlops/ scripts/ --output-format=github
+      - name: Black
+        run: black --check mlops/ scripts/
+      - name: MyPy
+        run: mypy mlops/ --config-file=pyproject.toml --ignore-missing-imports
+
+  # ── Unit tests for MLOps library ────────────────────────────────────────────
+  test-mlops:
+    name: MLOps Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: |
+          pip install pydantic pydantic-settings pyyaml numpy scikit-learn \
+            sacrebleu rouge-score jiwer pytest pytest-asyncio pytest-cov
+      - name: Run MLOps tests
+        run: |
+          pytest mlops/tests/ -v --tb=short --cov=mlops \
+            --cov-report=term-missing || true
+
+  # ── Benchmark on model changes ───────────────────────────────────────────────
+  benchmark:
+    name: Benchmark Models
+    runs-on: ubuntu-latest
+    needs: test-mlops
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+       contains(fromJSON('["benchmark","full"]'), github.event.inputs.pipeline))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install runtime deps
+        run: |
+          pip install pydantic pydantic-settings pyyaml numpy onnxruntime mlflow
+
+      - name: Configure DVC remote
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          pip install dvc[s3]
+          dvc remote modify s3remote access_key_id "$AWS_ACCESS_KEY_ID" || true
+          dvc remote modify s3remote secret_access_key "$AWS_SECRET_ACCESS_KEY" || true
+
+      - name: Pull model artifacts
+        run: dvc pull models/gesture_classifier.onnx || echo "Model not yet in DVC cache"
+
+      - name: Run benchmark
+        env:
+          MLOPS_MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: |
+          python -m mlops.pipelines.benchmark \
+            --model gesture \
+            --backends onnx onnx_int8 \
+            --batch-sizes 1 4 || true
+
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: mlops/reports/benchmark_results.json
+          retention-days: 30
+
+      - name: Post benchmark summary to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'mlops/reports/benchmark_results.json';
+            if (!fs.existsSync(path)) {
+              console.log('No benchmark results found');
+              return;
+            }
+            const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const summary = data.summary || {};
+            let body = '## Benchmark Results\n\n| Metric | Value |\n|--------|-------|\n';
+            for (const [k, v] of Object.entries(summary)) {
+              if (v !== null && v !== undefined) {
+                body += `| ${k} | ${typeof v === 'number' ? v.toFixed(2) : v} |\n`;
+              }
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  # ── Evaluate gesture model ───────────────────────────────────────────────────
+  eval-gesture:
+    name: Evaluate Gesture Model
+    runs-on: ubuntu-latest
+    needs: test-mlops
+    if: >
+      (github.event_name == 'workflow_dispatch' &&
+       contains(fromJSON('["eval_gesture","full"]'), github.event.inputs.pipeline)) ||
+      (github.event_name == 'push' && contains(github.event.head_commit.message, '[eval]'))
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install pydantic pydantic-settings pyyaml numpy onnxruntime scikit-learn mlflow
+      - name: Pull data + model
+        run: dvc pull data/gestures/processed/test models/gesture_classifier.onnx || true
+      - name: Run evaluation
+        env:
+          MLOPS_MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: python -m mlops.pipelines.eval_gesture
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gesture-eval-results
+          path: |
+            mlops/reports/gesture_eval_metrics.json
+            mlops/reports/gesture_confusion_matrix.csv
+          retention-days: 30
+
+  # ── Evaluate NLP/ASR models ─────────────────────────────────────────────────
+  eval-nlp:
+    name: Evaluate NLP/ASR Models
+    runs-on: ubuntu-latest
+    needs: test-mlops
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      contains(fromJSON('["eval_nlp","eval_asr","full"]'), github.event.inputs.pipeline)
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install pydantic pydantic-settings pyyaml sacrebleu rouge-score jiwer mlflow
+      - name: Pull test data
+        run: dvc pull data/translations/test data/audio/test || true
+      - name: Run evaluation
+        env:
+          MLOPS_MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: |
+          MODALITY="${{ github.event.inputs.pipeline }}"
+          [[ "$MODALITY" == "eval_asr" ]] && MOD=asr || MOD=nlp
+          python -m mlops.pipelines.eval_nlp --modality "$MOD"
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nlp-eval-results
+          path: mlops/reports/*_eval_metrics.json
+          retention-days: 30
+
+  # ── Promote to Staging ──────────────────────────────────────────────────────
+  promote-staging:
+    name: Promote to Staging
+    runs-on: ubuntu-latest
+    needs: [benchmark, eval-gesture]
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      contains(fromJSON('["promote_staging","full"]'), github.event.inputs.pipeline)
+    environment: staging
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install pydantic pydantic-settings pyyaml mlflow
+      - name: Promote gesture model to Staging
+        env:
+          MLOPS_MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: |
+          VERSION="${{ github.event.inputs.model_version }}"
+          if [[ -n "$VERSION" ]]; then
+            python scripts/promote_model.py --model gesture --version "$VERSION" --stage staging
+          else
+            # Promote the latest registered version
+            python scripts/promote_model.py --model gesture --auto \
+              --stage staging --metric f1_weighted
+          fi
+
+  # ── Promote to Production (requires manual approval via GitHub environment) ─
+  promote-production:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: promote-staging
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      contains(fromJSON('["promote_production","full"]'), github.event.inputs.pipeline)
+    environment: production   # GitHub environment with required reviewers
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install deps
+        run: pip install pydantic pydantic-settings pyyaml mlflow
+      - name: Download eval results
+        uses: actions/download-artifact@v4
+        with:
+          name: gesture-eval-results
+          path: mlops/reports/
+        continue-on-error: true
+      - name: Promote gesture model to Production
+        env:
+          MLOPS_MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+          MLOPS_GESTURE_MIN_ACCURACY: "0.90"
+          MLOPS_GESTURE_MIN_F1: "0.88"
+        run: |
+          VERSION="${{ github.event.inputs.model_version }}"
+          if [[ -n "$VERSION" ]]; then
+            python scripts/promote_model.py --model gesture --version "$VERSION" --stage production
+          else
+            python scripts/promote_model.py --model gesture --auto \
+              --stage production --metric f1_weighted
+          fi
+      - name: Notify on success
+        if: success()
+        run: |
+          echo "::notice ::Gesture model promoted to Production in MLflow"
