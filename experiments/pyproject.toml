@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "glossa-experiments"
+version = "0.1.0"
+description = "Architecture justification experiments for the Glossa RSL platform"
+requires-python = ">=3.10"
+
+dependencies = [
+    "numpy>=1.24",
+    "mlflow>=2.12",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+gesture = [
+    "onnxruntime>=1.17",
+    "onnxruntime-openvino>=1.17",
+    "mediapipe>=0.10",
+    "opencv-python>=4.9",
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "onnx>=1.15",
+]
+asr = [
+    "faster-whisper>=1.0",
+    "soundfile>=0.12",
+    "jiwer>=3.0",
+]
+nlp = [
+    "transformers>=4.40",
+    "torch>=2.2",
+    "sacrebleu>=2.4",
+    "rouge-score>=0.1.2",
+    "peft>=0.10",
+    "accelerate>=0.29",
+]
+rag = [
+    "qdrant-client>=1.8",
+    "sentence-transformers>=2.7",
+    "requests>=2.31",
+    "sacrebleu>=2.4",
+    "rouge-score>=0.1.2",
+]
+tts = [
+    "torch>=2.2",
+    "torchaudio>=2.2",
+    "speechmos>=1.0",
+]
+latency = [
+    "requests>=2.31",
+    "redis[hiredis]>=5.0",
+]
+all = [
+    "glossa-experiments[gesture,asr,nlp,rag,tts,latency]",
+]
+dev = [
+    "glossa-experiments[all]",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["experiments"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 99
+target-version = "py310"
