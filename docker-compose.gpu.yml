@@ -1,0 +1,51 @@
+# GPU override — adds NVIDIA runtime and device reservations
+name: glossa
+
+services:
+  cv-service:
+    build:
+      target: production-gpu
+    environment:
+      - CV_DEVICE=GPU
+      - CV_MODEL_BACKEND=openvino
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  asr-service:
+    environment:
+      - ASR_DEVICE=cuda
+      - ASR_COMPUTE_TYPE=float16
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  nlp-service:
+    environment:
+      - NLP_DEVICE=cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  tts-service:
+    environment:
+      - TTS_DEVICE=cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

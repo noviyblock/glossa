@@ -1,0 +1,207 @@
+# Production overrides — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Adds: resource limits, deploy constraints, production env, no host-bound ports
+# for internal services, restart policies, and log size caps.
+
+name: glossa
+
+x-prod-deploy: &prod-deploy
+  restart_policy:
+    condition: on-failure
+    delay: 5s
+    max_attempts: 3
+    window: 120s
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+  redis:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  qdrant:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ── Observability — reduced resources in prod (background tasks) ───────────
+  loki:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  promtail:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  otel-collector:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  prometheus:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  grafana:
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://${DOMAIN:-glossa.ai}/grafana/
+      - GF_SMTP_ENABLED=${GRAFANA_SMTP_ENABLED:-false}
+      - GF_SMTP_HOST=${GRAFANA_SMTP_HOST:-}
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  jaeger:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  mlflow:
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --default-artifact-root /mlartifacts
+      --backend-store-uri sqlite:///mlartifacts/mlflow.db
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  nginx:
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
+  # ── Application services ────────────────────────────────────────────────────
+  api-gateway:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+      - GATEWAY_WORKERS=2
+    deploy:
+      <<: *prod-deploy
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  cv-service:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  asr-service:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 6G
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+
+  nlp-service:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 6G
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+
+  tts-service:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  max-adapter:
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    deploy:
+      <<: *prod-deploy
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M

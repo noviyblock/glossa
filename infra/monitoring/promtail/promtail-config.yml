@@ -1,0 +1,56 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 1048576
+
+scrape_configs:
+  # ── Docker container logs ─────────────────────────────────────────────────
+  - job_name: glossa-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["service"]
+
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: container
+      - source_labels: [__meta_docker_container_label_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label: project
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream
+
+    pipeline_stages:
+      # Parse structured JSON logs produced by structlog/glossa_common
+      - json:
+          expressions:
+            level: level
+            event: event
+            trace_id: trace_id
+            service: service
+            timestamp: timestamp
+      - labels:
+          level:
+          service:
+          trace_id:
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+          fallback_formats:
+            - UnixMs
+            - Unix
+      # Drop noisy health-check lines at ingestion time
+      - drop:
+          expression: '.*health.*'
+          drop_counter_reason: health_check_noise

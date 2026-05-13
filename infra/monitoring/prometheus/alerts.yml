@@ -1,0 +1,141 @@
+groups:
+  # ── Service availability ───────────────────────────────────────────────────
+  - name: glossa.availability
+    interval: 30s
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"glossa-.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "{{ $labels.job }} on {{ $labels.instance }} has been unreachable for > 1 min."
+          runbook: "https://wiki.glossa.ai/runbooks/service-down"
+
+      - alert: ServiceRestartLoop
+        expr: increase(kube_pod_container_status_restarts_total[15m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container restart loop: {{ $labels.container }}"
+
+  # ── Latency ───────────────────────────────────────────────────────────────
+  - name: glossa.latency
+    rules:
+      - alert: HighAPILatencyP95
+        expr: >
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="glossa-api-gateway"}[5m]))
+            by (le, route)
+          ) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 latency > 2s on {{ $labels.route }}"
+          description: "P95 = {{ $value | humanizeDuration }}"
+
+      - alert: CriticalASRLatency
+        expr: >
+          histogram_quantile(0.99,
+            rate(glossa_asr_inference_duration_seconds_bucket[5m])
+          ) > 10.0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ASR P99 latency exceeds 10s"
+
+      - alert: CVInferenceSlowdown
+        expr: >
+          histogram_quantile(0.95,
+            rate(glossa_cv_inference_duration_seconds_bucket[5m])
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CV gesture recognition P95 > 1s"
+
+  # ── Error rates ───────────────────────────────────────────────────────────
+  - name: glossa.errors
+    rules:
+      - alert: HighErrorRate
+        expr: >
+          sum(rate(http_requests_total{status=~"5.."}[5m])) by (job)
+          /
+          sum(rate(http_requests_total[5m])) by (job)
+          > 0.05
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate > 5% on {{ $labels.job }}"
+          description: "Current rate: {{ $value | humanizePercentage }}"
+
+      - alert: PipelineFailureSpike
+        expr: rate(glossa_pipeline_failures_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pipeline failure spike detected"
+
+  # ── Infrastructure ────────────────────────────────────────────────────────
+  - name: glossa.infrastructure
+    rules:
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory > 85% ({{ $value | humanizePercentage }})"
+
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is unreachable"
+
+      - alert: QdrantHighDiskUsage
+        expr: qdrant_storage_size_bytes / qdrant_storage_capacity_bytes > 0.80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qdrant storage > 80% full"
+
+      - alert: DiskSpaceLow
+        expr: >
+          (node_filesystem_avail_bytes{mountpoint="/"}
+           / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Less than 15% disk space remaining"
+
+  # ── ML Model quality ──────────────────────────────────────────────────────
+  - name: glossa.models
+    rules:
+      - alert: LowGestureRecognitionConfidence
+        expr: avg_over_time(glossa_cv_confidence_score[10m]) < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CV model confidence below 50% — possible model drift"
+
+      - alert: ASRFallbackRateHigh
+        expr: rate(glossa_asr_fallback_total[5m]) / rate(glossa_asr_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ASR fallback rate > 10%"

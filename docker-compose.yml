@@ -1,0 +1,307 @@
+name: glossa
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+    labels: "service"
+    tag: "{{.Name}}"
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 15s
+  timeout: 5s
+  retries: 3
+  start_period: 30s
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging: *default-logging
+  env_file: .env
+  networks:
+    - glossa-internal
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    <<: *service-defaults
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "redis-cli", "ping"]
+    ports:
+      - "6379:6379"
+
+  qdrant:
+    image: qdrant/qdrant:v1.9.4
+    <<: *service-defaults
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+    ports:
+      - "6333:6333"
+
+  # ── Logging ─────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.0.0
+    <<: *service-defaults
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./infra/monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+    ports:
+      - "3100:3100"
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    <<: *service-defaults
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./infra/monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
+  # ── Observability ───────────────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.100.0
+    <<: *service-defaults
+    volumes:
+      - ./infra/monitoring/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    <<: *service-defaults
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.4.3
+    <<: *service-defaults
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+      - GF_UNIFIED_ALERTING_ENABLED=true
+    volumes:
+      - ./infra/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+    ports:
+      - "3001:3000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    <<: *service-defaults
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-gateway
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/nginx-health"]
+    ports:
+      - "80:80"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    <<: *service-defaults
+    environment:
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_DIRECTORY_KEY=/badger/key
+    volumes:
+      - jaeger-data:/badger
+    ports:
+      - "16686:16686"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.1
+    <<: *service-defaults
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --default-artifact-root /mlartifacts
+    volumes:
+      - mlflow-data:/mlartifacts
+    ports:
+      - "5000:5000"
+
+  # ── Application Services ────────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: services/api_gateway
+      dockerfile: Dockerfile
+      target: production
+    <<: *service-defaults
+    environment:
+      - GATEWAY_PORT=8000
+    depends_on:
+      redis:
+        condition: service_healthy
+      cv-service:
+        condition: service_healthy
+      asr-service:
+        condition: service_healthy
+      nlp-service:
+        condition: service_healthy
+      tts-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+    ports:
+      - "8000:8000"
+    labels:
+      - "service=api-gateway"
+
+  cv-service:
+    build:
+      context: services/cv_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *service-defaults
+    environment:
+      - CV_SERVICE_PORT=8001
+    volumes:
+      - model-store:/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health/live"]
+    ports:
+      - "8001:8001"
+    labels:
+      - "service=cv-service"
+
+  asr-service:
+    build:
+      context: services/asr_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *service-defaults
+    environment:
+      - ASR_SERVICE_PORT=8002
+    volumes:
+      - model-store:/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health/live"]
+    ports:
+      - "8002:8002"
+    labels:
+      - "service=asr-service"
+    shm_size: "1g"
+
+  nlp-service:
+    build:
+      context: services/nlp_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *service-defaults
+    environment:
+      - NLP_SERVICE_PORT=8003
+    volumes:
+      - model-store:/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health/live"]
+    ports:
+      - "8003:8003"
+    labels:
+      - "service=nlp-service"
+    shm_size: "2g"
+
+  tts-service:
+    build:
+      context: services/tts_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *service-defaults
+    environment:
+      - TTS_SERVICE_PORT=8004
+    volumes:
+      - model-store:/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health/live"]
+    ports:
+      - "8004:8004"
+    labels:
+      - "service=tts-service"
+
+  max-adapter:
+    build:
+      context: services/max_adapter
+      dockerfile: Dockerfile
+      target: production
+    <<: *service-defaults
+    environment:
+      - MAX_ADAPTER_PORT=8005
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health/live"]
+    ports:
+      - "8005:8005"
+    labels:
+      - "service=max-adapter"
+
+networks:
+  glossa-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  redis-data:
+  qdrant-data:
+  prometheus-data:
+  grafana-data:
+  jaeger-data:
+  mlflow-data:
+  loki-data:
+  model-store:
