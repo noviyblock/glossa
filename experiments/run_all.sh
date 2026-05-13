@@ -102,6 +102,9 @@ run_exp "07_tts_utmos" "TTS UTMOS quality evaluation" \
 run_exp "08_e2e_latency" "End-to-end latency breakdown" \
   --n-samples "$N_SAMPLES" --host "$HOST" --redis-url "$REDIS_URL" $DRY_RUN
 
+run_exp "09_cross_validation" "K-fold CV, learning curve, calibration" \
+  --k-folds 5 $DRY_RUN
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════════════════"
@@ -109,7 +112,7 @@ echo "  Results"
 echo "  ─────────────────────────────────────────────────────────────────"
 for id in 01_gesture_backbone 02_sliding_window 03_inference_acceleration \
            04_asr_comparison 05_nlp_llm_size 06_rag_ablation \
-           07_tts_utmos 08_e2e_latency; do
+           07_tts_utmos 08_e2e_latency 09_cross_validation; do
   ms="${TIMES[$id]:-—}"
   if should_skip "${id%%_*}"; then
     printf "  %-32s  SKIPPED\n" "$id"

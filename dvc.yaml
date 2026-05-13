@@ -36,23 +36,47 @@ stages:
           cache: true
 
   # ── Dataset preprocessing ──────────────────────────────────────────────────
-  preprocess_gesture_dataset:
-    cmd: python scripts/preprocess_gesture_dataset.py
+  eda_slovo:
+    cmd: python notebooks/01_eda_slovo.py --slovo-root ${data.slovo_root} --out-dir experiments/results/eda
     deps:
-      - data/gestures/raw
+      - notebooks/01_eda_slovo.py
+      - experiments/shared/slovo_dataset.py
+      - experiments/shared/preprocessing.py
+    params:
+      - params.yaml:
+          - data.slovo_root
+    metrics:
+      - experiments/results/eda/eda_results.json:
+          cache: false
+
+  preprocess_gesture_dataset:
+    cmd: >
+      python scripts/preprocess_gesture_dataset.py
+      --slovo-root ${data.slovo_root}
+      --out-dir data/gestures/processed
+      --target-len ${gesture.sequence_length}
+      --flip-prob ${gesture.augmentation.flip_prob}
+      --noise-std ${gesture.augmentation.noise_std}
+      --seed ${data.random_seed}
+    deps:
       - scripts/preprocess_gesture_dataset.py
+      - experiments/shared/slovo_dataset.py
+      - experiments/shared/preprocessing.py
     params:
       - params.yaml:
           - data.random_seed
+          - data.slovo_root
           - data.train_split
           - data.val_split
           - data.test_split
           - gesture.sequence_length
-          - gesture.stride
           - gesture.augmentation
     outs:
       - data/gestures/processed:
           cache: true
+    metrics:
+      - data/gestures/processed/preprocessing_stats.json:
+          cache: false
 
   # ── Gesture training ───────────────────────────────────────────────────────
   train_gesture:
@@ -233,6 +257,21 @@ stages:
           - experiments.tts.n_samples
     metrics:
       - experiments/results/07_tts_utmos/results.json:
+          cache: false
+
+  exp_09_cross_validation:
+    cmd: python -m experiments.09_cross_validation.run --dry-run
+    deps:
+      - experiments/09_cross_validation/run.py
+      - experiments/shared/preprocessing.py
+      - experiments/shared/mlflow_utils.py
+    params:
+      - params.yaml:
+          - experiments.cross_val.k_folds
+          - experiments.cross_val.epochs
+          - data.random_seed
+    metrics:
+      - experiments/results/09_cross_validation/results.json:
           cache: false
 
   exp_08_e2e_latency:

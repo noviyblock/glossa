@@ -9,6 +9,7 @@ data:
   train_split: 0.80
   val_split:   0.10
   test_split:  0.10
+  slovo_root:      data/slovo           # override with --slovo-root or $SLOVO_ROOT
   gesture_dataset: data/gestures
   nlp_dataset:     data/translations
   asr_dataset:     data/audio
@@ -74,6 +75,10 @@ benchmark:
 
 # ── Architecture-justification experiments ────────────────────────────────────
 experiments:
+  cross_val:
+    k_folds: 5
+    epochs: 30
+    train_fracs: [0.05, 0.10, 0.25, 0.50, 0.75, 1.0]
   gesture:
     n_samples: 100
     seq_len: 30
