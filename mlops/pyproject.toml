@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "glossa-mlops"
+version = "0.1.0"
+description = "Glossa MLOps — experiment tracking, model registry, and training pipelines"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+tracking = [
+    "mlflow>=2.13",
+    "scikit-learn>=1.5",
+    "sacrebleu>=2.4",
+    "rouge-score>=0.1.2",
+    "jiwer>=3.0",
+]
+training = [
+    "torch>=2.3",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "onnxsim>=0.4",
+]
+openvino = [
+    "openvino>=2024.1",
+]
+dvc = [
+    "dvc>=3.50",
+    "dvc-s3>=3.0",
+]
+all = [
+    "glossa-mlops[tracking,training,dvc]",
+]
+test = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "fakeredis>=2.23",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["mlops"]
+
+[project.scripts]
+glossa-benchmark   = "mlops.pipelines.benchmark:run"
+glossa-eval        = "mlops.pipelines.eval_gesture:run"
+glossa-promote     = "scripts.promote_model:main"
