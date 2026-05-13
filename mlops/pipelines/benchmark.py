@@ -8,12 +8,16 @@ Usage:
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import argparse
 import json
 import time
-from dataclasses import dataclass, asdict
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import numpy as np
 
@@ -103,7 +107,7 @@ def _quantize_onnx_int8(model_path: Path) -> Path | None:
     if out_path.exists():
         return out_path
     try:
-        from onnxruntime.quantization import quantize_dynamic, QuantType  # type: ignore[import]
+        from onnxruntime.quantization import QuantType, quantize_dynamic  # type: ignore[import]
         quantize_dynamic(str(model_path), str(out_path), weight_type=QuantType.QInt8)
         return out_path
     except Exception:
@@ -138,7 +142,7 @@ def run_gesture_benchmarks(
                 elif backend == "onnx_int8":
                     int8_path = _quantize_onnx_int8(model_path)
                     if int8_path is None:
-                        print(f"  INT8 quantization failed, skipping")
+                        print("  INT8 quantization failed, skipping")
                         continue
                     latency, memory = _bench_onnx(int8_path, input_fn, batch_size, cfg.benchmark_n_samples, cfg.benchmark_warmup_runs)
                 elif backend == "openvino":

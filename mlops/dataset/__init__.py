@@ -1,3 +1,3 @@
-from mlops.dataset.versioning import DatasetVersioner, DatasetSnapshot
+from mlops.dataset.versioning import DatasetSnapshot, DatasetVersioner
 
-__all__ = ["DatasetVersioner", "DatasetSnapshot"]
+__all__ = ["DatasetSnapshot", "DatasetVersioner"]

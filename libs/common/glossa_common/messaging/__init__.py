@@ -4,8 +4,8 @@ from .redis_streams import RedisStreamConsumer, RedisStreamPublisher, create_red
 __all__ = [
     "EventType",
     "GlossaEvent",
-    "STREAMS",
-    "RedisStreamPublisher",
     "RedisStreamConsumer",
+    "RedisStreamPublisher",
+    "STREAMS",
     "create_redis_pool",
 ]

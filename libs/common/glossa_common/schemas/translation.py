@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -19,7 +19,7 @@ class TranslationRequest(GlossaModel):
     target_language: str = "ru"
     context_hint: str | None = Field(default=None, max_length=500)
     domain: str = Field(default="general", pattern=r"^(general|medical|banking|legal)$")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class TranslationChunk(GlossaModel):
@@ -41,11 +41,11 @@ class TranslationResult(GlossaModel):
     total_latency_ms: float
     stage_latencies: dict[str, float] = Field(default_factory=dict)
     tokens_used: int | None = None
-    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class WebSocketMessage(GlossaModel):
     type: str  # "chunk" | "result" | "error" | "ping"
     session_id: UUID
     payload: dict[str, object] = Field(default_factory=dict)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))

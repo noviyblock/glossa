@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,7 +31,7 @@ class HealthResponse(GlossaModel):
     service: str
     status: str
     version: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     components: list[ComponentHealth] = Field(default_factory=list)
     uptime_seconds: float | None = None
 
@@ -45,4 +45,4 @@ class ErrorDetail(GlossaModel):
 class ErrorResponse(GlossaModel):
     error: ErrorDetail
     request_id: UUID = Field(default_factory=uuid4)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))

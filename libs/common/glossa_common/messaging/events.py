@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
@@ -56,7 +56,7 @@ class GlossaEvent(GlossaModel):
     session_id: UUID
     producer: str
     payload: dict[str, object] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     correlation_id: UUID | None = None
 
     def stream_name(self) -> str:
