@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "glossa-benchmarks"
+version = "0.1.0"
+description = "Benchmarking and load-testing suite for the Glossa multimodal platform"
+requires-python = ">=3.11"
+
+# Minimal runtime — only what every runner needs
+dependencies = [
+    "aiohttp>=3.9",
+    "aiofiles>=23.2",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+locust = [
+    "locust>=2.29",
+    "locust-plugins>=4.4",   # WebSocketUser support
+]
+redis = [
+    "redis[hiredis]>=5.0",
+]
+profiling = [
+    "py-spy>=0.3.14",
+    "pynvml>=11.5",
+]
+report = [
+    # HTML/Markdown reporter — no heavy ML deps needed
+]
+all = [
+    "glossa-benchmarks[locust,redis,profiling,report]",
+]
+dev = [
+    "glossa-benchmarks[all]",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["benchmarks*"]
+
+# ── Pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: requires live services",
+    "slow: benchmark takes >10s",
+]
+
+# ── Ruff (inherits most config from root pyproject.toml) ──────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"locustfile.py" = ["N999"]  # module name not snake_case by Locust convention
