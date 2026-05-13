@@ -31,18 +31,54 @@ class SlovoSample:
 
 
 class SlovoDataset:
-    """Iterable loader for the Slovo RSL gesture dataset."""
+    """Iterable loader for the Slovo RSL gesture dataset.
 
-    REQUIRED_COLS = {"attachment_id", "text", "begin", "end", "split"}
+    Handles the actual Kaggle CSV schema:
+        attachment_id, text, user_id, height, width, length, train, begin, end
+    where `train` is a bool (True = train split, False = val/test).
+    Videos are searched in: <root>/videos/, <root>/train/, <root>/test/
+    """
 
-    def __init__(self, root: str | Path, split: str = "all"):
+    def __init__(
+        self,
+        root: str | Path,
+        split: str = "all",
+        exclude_no_event: bool = True,
+    ):
         self.root = Path(root)
         self.split = split
+        self.exclude_no_event = exclude_no_event
         self._samples: list[SlovoSample] = []
         self._label_map: dict[str, int] = {}
         self._load()
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_split(row: dict) -> str:
+        """Derive split string from either 'split' col or 'train' bool col."""
+        if "split" in row and row["split"]:
+            return row["split"]
+        train_val = row.get("train", "True")
+        if isinstance(train_val, bool):
+            return "train" if train_val else "val"
+        return "train" if str(train_val).lower() in ("true", "1", "yes") else "val"
+
+    def _find_video(self, row: dict, split: str) -> Path:
+        """Try multiple path conventions used by Slovo on Kaggle and locally."""
+        aid = row["attachment_id"]
+        text = row["text"]
+        candidates = [
+            self.root / "videos" / f"{aid}.mp4",
+            self.root / split / text / f"{aid}.mp4",
+            self.root / split / f"{aid}.mp4",
+            self.root / text / f"{aid}.mp4",
+            self.root / f"{aid}.mp4",
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        return candidates[0]  # return best guess even if missing
 
     def _load(self) -> None:
         ann = self._find_annotations()
@@ -52,21 +88,23 @@ class SlovoDataset:
         with open(ann, encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                s = row.get("split", "train")
+                text = row["text"]
+                if self.exclude_no_event and text == "no_event":
+                    continue
+                s = self._parse_split(row)
                 if self.split != "all" and s != self.split:
                     continue
-                if row["text"] not in classes:
-                    classes.append(row["text"])
-                raw.append(dict(row))
+                if text not in classes:
+                    classes.append(text)
+                raw.append({**row, "_split": s})
 
         classes.sort()
         self._label_map = {name: i for i, name in enumerate(classes)}
 
         for row in raw:
-            s = row.get("split", "train")
-            vp = self.root / s / row["text"] / f"{row['attachment_id']}.mp4"
+            s = row["_split"]
             self._samples.append(SlovoSample(
-                video_path=vp,
+                video_path=self._find_video(row, s),
                 label=self._label_map[row["text"]],
                 label_name=row["text"],
                 start_frame=int(row.get("begin", 0) or 0),
@@ -162,7 +200,7 @@ class SlovoDataset:
     def load_keypoints_mediapipe(
         self,
         sample: SlovoSample,
-        target_len: int = 30,
+        target_len: int = 64,
     ) -> np.ndarray:
         """Extract MediaPipe Holistic keypoints → float32 (T, 75, 3).
 

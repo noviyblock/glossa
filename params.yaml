@@ -18,8 +18,8 @@ data:
 gesture:
   model_architecture: stgcn   # stgcn | poseformer | mlstm
   num_classes: 200
-  sequence_length: 30
-  stride: 15
+  sequence_length: 64   # EDA: median=48, Q3=58 → 64 covers ~80% without padding
+  stride: 32
   # Training
   batch_size: 32
   learning_rate: 0.001
@@ -81,7 +81,7 @@ experiments:
     train_fracs: [0.05, 0.10, 0.25, 0.50, 0.75, 1.0]
   gesture:
     n_samples: 100
-    seq_len: 30
+    seq_len: 64
   sliding_window:
     window_sizes: [16, 30, 48, 64]
     strides:      [1, 8, 15, 30]
