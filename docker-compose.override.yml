@@ -45,6 +45,7 @@ services:
     volumes:
       - ./services/tts_service:/app:cached
       - ./models:/models:ro
+      - torch-cache:/torch_cache
     environment:
       ENVIRONMENT: development
       LOG_LEVEL: DEBUG

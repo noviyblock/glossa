@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 import torch
@@ -48,8 +49,17 @@ class Translator:
         device_map: str = DEVICE_MAP,
         max_new_tokens: int = MAX_NEW_TOKENS,
     ) -> None:
+        if not os.path.isdir(model_path):
+            raise FileNotFoundError(
+                f"NLP model directory not found: {model_path}\n"
+                "Run `make models` or `dvc pull` and check the docker-compose "
+                "volume mount for /models."
+            )
+
         logger.info("Loading tokenizer from %s", model_path)
-        self._tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=True, local_files_only=True
+        )
 
         logger.info("Loading model (bfloat16, device_map=%s)", device_map)
         self._model = AutoModelForCausalLM.from_pretrained(
@@ -57,6 +67,7 @@ class Translator:
             torch_dtype=torch.bfloat16,
             device_map=device_map,
             trust_remote_code=True,
+            local_files_only=True,
         )
         self._model.eval()
         self._max_new_tokens = max_new_tokens

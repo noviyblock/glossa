@@ -189,9 +189,10 @@ services:
       DEFAULT_SPEAKER: xenia
       SAMPLE_RATE: "24000"
       CACHE_SIZE: "200"
-      TORCH_HOME: /models/torch_cache
+      TORCH_HOME: /torch_cache
     volumes:
       - ./models:/models:ro
+      - torch-cache:/torch_cache
     depends_on:
       redis:
         condition: service_healthy
@@ -243,3 +244,4 @@ volumes:
   mlflow-data:
   prometheus-data:
   grafana-data:
+  torch-cache:

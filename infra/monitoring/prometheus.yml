@@ -21,38 +21,38 @@ scrape_configs:
   - job_name: glossa-api-gateway
     static_configs:
       - targets: ["api-gateway:8000"]
+        labels:
+          service: api-gateway
     metrics_path: /metrics
     scrape_interval: 10s
-    labels:
-      service: api-gateway
 
   - job_name: glossa-cv-service
     static_configs:
       - targets: ["cv-service:8001"]
+        labels:
+          service: cv-service
     metrics_path: /metrics
-    labels:
-      service: cv-service
 
   - job_name: glossa-asr-service
     static_configs:
       - targets: ["asr-service:8002"]
+        labels:
+          service: asr-service
     metrics_path: /metrics
-    labels:
-      service: asr-service
 
   - job_name: glossa-nlp-service
     static_configs:
       - targets: ["nlp-service:8003"]
+        labels:
+          service: nlp-service
     metrics_path: /metrics
-    labels:
-      service: nlp-service
 
   - job_name: glossa-tts-service
     static_configs:
       - targets: ["tts-service:8004"]
+        labels:
+          service: tts-service
     metrics_path: /metrics
-    labels:
-      service: tts-service
 
   - job_name: redis
     static_configs:
