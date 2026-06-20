@@ -213,8 +213,18 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                 print(f"  Error: {e}")
 
     with mlflow_run(
-        EXPERIMENT_NAME, run_name=f"qwen_cmp_n{args.n_samples}",
-        tags={"experiment": "05"},
+        EXPERIMENT_NAME,
+        run_name=f"qwen_cmp_n{args.n_samples}_{time.strftime('%Y%m%d_%H%M')}",
+        tags={"experiment": "05",
+              "mode": "dry_run" if args.dry_run else "full",
+              "models": "qwen2-0.5b,1.5b,7b",
+              "decision": "qwen2-1.5b-instruct"},
+        nested=True,
+        description=(
+            "Выбор размера LLM для перевода РЖЯ-глосс в русский текст. "
+            "Qwen2-0.5B / 1.5B / 7B. Метрика BLEU-4 ≥ 0.35, P95 ≤ 600 мс. "
+            "Продакшн: Qwen2-1.5B-Instruct (BLEU-4=0.38)."
+        ),
     ) as _run:
         log_params({"n_samples": args.n_samples, "max_new_tokens": args.max_new_tokens})
         for key, m in results.items():

@@ -37,6 +37,10 @@ class SlovoDataset:
         attachment_id, text, user_id, height, width, length, train, begin, end
     where `train` is a bool (True = train split, False = val/test).
     Videos are searched in: <root>/videos/, <root>/train/, <root>/test/
+
+    Pass label_mapping_path pointing to the label_mapping.json produced by
+    experiment 00 to guarantee that class IDs are identical across all stages
+    (EDA → preprocessing → training → evaluation).
     """
 
     def __init__(
@@ -44,10 +48,12 @@ class SlovoDataset:
         root: str | Path,
         split: str = "all",
         exclude_no_event: bool = True,
+        label_mapping_path: str | Path | None = None,
     ):
         self.root = Path(root)
         self.split = split
         self.exclude_no_event = exclude_no_event
+        self._label_mapping_path = Path(label_mapping_path) if label_mapping_path else None
         self._samples: list[SlovoSample] = []
         self._label_map: dict[str, int] = {}
         self._load()
@@ -65,22 +71,31 @@ class SlovoDataset:
         return "train" if str(train_val).lower() in ("true", "1", "yes") else "val"
 
     def _find_video(self, row: dict, split: str) -> Path:
-        """Try multiple path conventions used by Slovo on Kaggle and locally."""
+        """Try multiple path conventions used by Slovo on Kaggle and locally.
+
+        The CSV encodes non-train samples as split="val", but on Kaggle the
+        physical directory is named "test/", so we try both names.
+        """
         aid = row["attachment_id"]
         text = row["text"]
+        alt = "test" if split == "val" else split
         candidates = [
             self.root / "videos" / f"{aid}.mp4",
             self.root / split / text / f"{aid}.mp4",
+            self.root / alt   / text / f"{aid}.mp4",
             self.root / split / f"{aid}.mp4",
-            self.root / text / f"{aid}.mp4",
+            self.root / alt   / f"{aid}.mp4",
+            self.root / text  / f"{aid}.mp4",
             self.root / f"{aid}.mp4",
         ]
         for p in candidates:
             if p.exists():
                 return p
-        return candidates[0]  # return best guess even if missing
+        return candidates[0]  # best guess even if missing
 
     def _load(self) -> None:
+        import json as _json
+
         ann = self._find_annotations()
         classes: list[str] = []
         raw: list[dict] = []
@@ -98,15 +113,25 @@ class SlovoDataset:
                     classes.append(text)
                 raw.append({**row, "_split": s})
 
-        classes.sort()
-        self._label_map = {name: i for i, name in enumerate(classes)}
+        # Use external mapping (from exp 00 EDA) when available so that
+        # class IDs are consistent across preprocessing, training and evaluation.
+        if self._label_mapping_path and self._label_mapping_path.exists():
+            with open(self._label_mapping_path, encoding="utf-8") as f:
+                mapping = _json.load(f)
+            self._label_map = {str(k): int(v) for k, v in mapping["label_to_id"].items()}
+        else:
+            classes.sort()
+            self._label_map = {name: i for i, name in enumerate(classes)}
 
         for row in raw:
             s = row["_split"]
+            text = row["text"]
+            if text not in self._label_map:
+                continue  # class absent from external mapping — skip
             self._samples.append(SlovoSample(
                 video_path=self._find_video(row, s),
-                label=self._label_map[row["text"]],
-                label_name=row["text"],
+                label=self._label_map[text],
+                label_name=text,
                 start_frame=int(row.get("begin", 0) or 0),
                 end_frame=int(row.get("end", -1) or -1),
                 split=s,
@@ -147,6 +172,10 @@ class SlovoDataset:
     @property
     def inv_label_map(self) -> dict[int, str]:
         return {v: k for k, v in self._label_map.items()}
+
+    @property
+    def samples(self) -> list[SlovoSample]:
+        return self._samples
 
     def by_split(self, split: str) -> list[SlovoSample]:
         return [s for s in self._samples if s.split == split]

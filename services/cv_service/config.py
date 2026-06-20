@@ -1,0 +1,15 @@
+import os
+
+WINDOW_SIZE      = int(os.getenv("WINDOW_SIZE", "32"))
+NUM_JOINTS       = int(os.getenv("NUM_JOINTS", "75"))
+IN_CHANNELS      = int(os.getenv("IN_CHANNELS", "3"))
+NUM_CLASSES      = int(os.getenv("NUM_CLASSES", "1000"))
+WINDOW_STRIDE    = int(os.getenv("WINDOW_STRIDE", "15"))
+CONF_THRESHOLD   = float(os.getenv("CONF_THRESHOLD", "0.7"))
+ONNX_MOBILE_PATH = os.getenv("ONNX_MOBILE_PATH", "/models/gesture_classifier_mobile.onnx")
+OV_XML_PATH      = os.getenv("OV_XML_PATH", "/models/stgcn_topk_int8/stgcn_topk_int8.xml")
+NORM_STATS_PATH  = os.getenv("NORM_STATS_PATH", "/models/norm_stats.npz")
+CLASS_MAP_PATH   = os.getenv("CLASS_MAP_PATH", "/data/idx_to_class.json")
+REDIS_URL        = os.getenv("REDIS_URL", "redis://redis:6379")
+CV_STREAM_OUT    = os.getenv("CV_STREAM_OUT", "cv:results")
+SERVICE_PORT     = int(os.getenv("CV_SERVICE_PORT", "8001"))

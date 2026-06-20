@@ -1,0 +1,14 @@
+{
+  "model": "Qwen2.5-7B-Instruct",
+  "bleu_4": 28.156384670163995,
+  "rouge_l": 0.0,
+  "val_loss": 0.31399160623550415,
+  "val_ppl": 1.2431424361382455,
+  "train_samples": 1753,
+  "total_pairs": 2063,
+  "lora_r": 64,
+  "lora_alpha": 128,
+  "epochs": 5,
+  "lr": 5e-05,
+  "version": "qwen25_7b_5000"
+}

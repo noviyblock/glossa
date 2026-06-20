@@ -1,4 +1,4 @@
-"""Gesture classifier training pipeline.
+"""Gesture classifier training pipeline — real ST-GCN on 75 MediaPipe nodes.
 
 Usage:
     python -m mlops.pipelines.train_gesture
@@ -28,6 +28,168 @@ try:
 except ImportError:
     _SLOVO_AVAILABLE = False
 
+# ── Graph topology ────────────────────────────────────────────────────────────
+# MediaPipe Holistic: 33 Pose + 21 Left Hand + 21 Right Hand = 75 nodes
+# Pose: 0-32 | Left Hand: 33-53 | Right Hand: 54-74
+
+_POSE_EDGES = [
+    (0, 1), (1, 2), (2, 3), (3, 7),
+    (0, 4), (4, 5), (5, 6), (6, 8),
+    (9, 10),
+    (11, 12),
+    (11, 13), (13, 15),
+    (12, 14), (14, 16),
+    (15, 17), (15, 19), (15, 21), (17, 19),
+    (16, 18), (16, 20), (16, 22), (18, 20),
+    (11, 23), (12, 24), (23, 24),
+    (23, 25), (24, 26), (25, 27), (26, 28),
+    (27, 29), (27, 31), (28, 30), (28, 32), (29, 31), (30, 32),
+]
+
+_HAND_EDGES = [
+    (0, 1), (1, 2), (2, 3), (3, 4),        # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),        # index
+    (0, 9), (9, 10), (10, 11), (11, 12),   # middle
+    (0, 13), (13, 14), (14, 15), (15, 16), # ring
+    (0, 17), (17, 18), (18, 19), (19, 20), # pinky
+    (5, 9), (9, 13), (13, 17), (5, 17),    # palm cross-links
+]
+
+_LEFT_HAND_OFFSET = 33
+_RIGHT_HAND_OFFSET = 54
+_NUM_NODES = 75
+
+
+def build_adjacency() -> np.ndarray:
+    """Build symmetric-normalised adjacency matrix for 75 MediaPipe nodes.
+
+    Returns D^{-1/2} (A + I) D^{-1/2} as float32 array of shape (75, 75).
+    """
+    A = np.eye(_NUM_NODES, dtype=np.float32)
+    for i, j in _POSE_EDGES:
+        A[i, j] = A[j, i] = 1.0
+    for i, j in _HAND_EDGES:
+        a, b = i + _LEFT_HAND_OFFSET, j + _LEFT_HAND_OFFSET
+        A[a, b] = A[b, a] = 1.0
+        a, b = i + _RIGHT_HAND_OFFSET, j + _RIGHT_HAND_OFFSET
+        A[a, b] = A[b, a] = 1.0
+    # Cross: pose wrists connect to hand root nodes
+    A[15, _LEFT_HAND_OFFSET] = A[_LEFT_HAND_OFFSET, 15] = 1.0
+    A[16, _RIGHT_HAND_OFFSET] = A[_RIGHT_HAND_OFFSET, 16] = 1.0
+    # Symmetric normalisation
+    deg = A.sum(axis=1)
+    d_inv_sqrt = np.where(deg > 0, 1.0 / np.sqrt(deg), 0.0)
+    return (d_inv_sqrt[:, None] * A * d_inv_sqrt[None, :]).astype(np.float32)
+
+
+# ── ST-GCN architecture ───────────────────────────────────────────────────────
+
+def _build_stgcn(num_classes: int) -> Any:
+    """Return a full STGCN model. Requires PyTorch."""
+    import torch
+    import torch.nn as nn
+
+    A_np = build_adjacency()
+    A_t = torch.tensor(A_np)
+
+    class _GraphConv(nn.Module):
+        """Single-partition graph convolution (ONNX-compatible via einsum)."""
+
+        def __init__(self, in_ch: int, out_ch: int) -> None:
+            super().__init__()
+            self.register_buffer("A", A_t.clone())
+            self.fc = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+            self.bn = nn.BatchNorm2d(out_ch)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # x: (B, C, T, V)
+            x = self.fc(x)
+            x = torch.einsum("bctv,vw->bctw", x, self.A)  # type: ignore[attr-defined]
+            return self.bn(x)
+
+    class _TCN(nn.Module):
+        def __init__(self, ch: int, stride: int = 1, kernel: int = 9) -> None:
+            super().__init__()
+            pad = (kernel - 1) // 2
+            self.net = nn.Sequential(
+                nn.Conv2d(ch, ch, (kernel, 1), stride=(stride, 1), padding=(pad, 0)),
+                nn.BatchNorm2d(ch),
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.net(x)
+
+    class _Block(nn.Module):
+        def __init__(self, in_ch: int, out_ch: int,
+                     stride: int = 1, residual: bool = True) -> None:
+            super().__init__()
+            self.gcn = _GraphConv(in_ch, out_ch)
+            self.tcn = _TCN(out_ch, stride=stride)
+            self.relu = nn.ReLU(inplace=True)
+            if not residual:
+                self.skip: nn.Module = nn.Sequential()  # zero init — handled below
+                self._zero_skip = True
+            elif in_ch == out_ch and stride == 1:
+                self.skip = nn.Identity()
+                self._zero_skip = False
+            else:
+                self.skip = nn.Sequential(
+                    nn.Conv2d(in_ch, out_ch, 1, stride=(stride, 1)),
+                    nn.BatchNorm2d(out_ch),
+                )
+                self._zero_skip = False
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            res = torch.zeros_like(self.tcn(self.gcn(x))) if self._zero_skip else self.skip(x)
+            return self.relu(self.tcn(self.gcn(x)) + res)
+
+    class STGCN(nn.Module):
+        """ST-GCN for RSL gesture recognition.
+
+        Input:  (B, T, 75, 3)
+        Output: (B, num_classes)
+        """
+
+        _LAYER_CFG = [
+            # (in_ch, out_ch, stride, residual)
+            (3,   64,  1, False),
+            (64,  64,  1, True),
+            (64,  64,  1, True),
+            (64,  64,  1, True),
+            (64,  128, 2, True),
+            (128, 128, 1, True),
+            (128, 128, 1, True),
+            (128, 256, 2, True),
+            (256, 256, 1, True),
+            (256, 256, 1, True),
+        ]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.data_bn = nn.BatchNorm1d(3 * _NUM_NODES)
+            self.layers = nn.ModuleList([
+                _Block(ic, oc, st, res) for ic, oc, st, res in self._LAYER_CFG
+            ])
+            self.pool = nn.AdaptiveAvgPool2d((1, 1))
+            self.drop = nn.Dropout(0.5)
+            self.fc = nn.Linear(256, num_classes)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # x: (B, T, V, C)
+            B, T, V, C = x.shape
+            # Apply BN over (B*T, C*V)
+            x = x.permute(0, 1, 3, 2).contiguous().view(B * T, C * V)
+            x = self.data_bn(x)
+            x = x.view(B, T, C, V).permute(0, 2, 1, 3).contiguous()  # (B, C, T, V)
+            for layer in self.layers:
+                x = layer(x)
+            x = self.pool(x).view(B, -1)
+            return self.fc(self.drop(x))
+
+    return STGCN()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_params(params_path: str = "params.yaml") -> dict[str, Any]:
     try:
@@ -42,7 +204,7 @@ def _set_seeds(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     try:
-        import torch  # type: ignore[import]
+        import torch
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
@@ -50,48 +212,18 @@ def _set_seeds(seed: int) -> None:
         pass
 
 
-def _build_model(params: dict[str, Any]) -> Any:
-    """Build the gesture classifier model from params.yaml settings."""
-    arch = params.get("model_architecture", "stgcn")
-    num_classes = params.get("num_classes", 200)
-    seq_len = params.get("sequence_length", 30)
-
-    try:
-        import torch
-        import torch.nn as nn
-
-        if arch == "stgcn":
-            # Spatial-Temporal Graph Convolutional Network stub
-            # In production, import from services/gesture_recognition
-            class _STGCNStub(nn.Module):
-                def __init__(self) -> None:
-                    super().__init__()
-                    self.fc = nn.Linear(seq_len * 33 * 3, num_classes)
-
-                def forward(self, x: Any) -> Any:  # type: ignore[override]
-                    return self.fc(x.view(x.size(0), -1))
-
-            return _STGCNStub()
-        else:
-            raise ValueError(f"Unknown architecture: {arch}")
-    except ImportError as exc:
-        raise RuntimeError("PyTorch required for training: pip install torch") from exc
-
-
 def _load_dataset(
     data_path: Path,
     split: str = "train",
     slovo_root: str | None = None,
-    seq_len: int = 30,
+    seq_len: int = 64,
     flip_prob: float = 0.5,
 ) -> tuple[Any, Any, list[str]]:
     """Load processed gesture dataset.
 
-    Falls back to SlovoDataset when slovo_root is provided and processed
-    data is not available yet (typical for first runs on Kaggle/Yandex).
+    Returns X of shape (N, T, 75, 3), y of shape (N,), class_names list.
+    Falls back to SlovoDataset when processed data is absent.
     """
-    import numpy as np
-
     split_dir = data_path / "gestures" / "processed" / split
 
     if split_dir.exists():
@@ -99,7 +231,10 @@ def _load_dataset(
         y = np.load(split_dir / "labels.npy")
         class_names_path = split_dir.parent / "class_names.json"
         class_names = json.loads(class_names_path.read_text()) if class_names_path.exists() else []
-        return X, y, class_names
+        # Normalise shape from legacy (N, T, 225) to (N, T, 75, 3)
+        if X.ndim == 3:
+            X = X.reshape(X.shape[0], X.shape[1], _NUM_NODES, 3)
+        return X.astype(np.float32), y, class_names
 
     if slovo_root and _SLOVO_AVAILABLE:
         print(f"[train_gesture] Processed split not found — loading from SlovoDataset({slovo_root})")
@@ -114,9 +249,10 @@ def _load_dataset(
                 kp = ds.load_keypoints_mediapipe(s, target_len=seq_len)
             except Exception:
                 continue
+            kp = kp.reshape(seq_len, _NUM_NODES, 3)  # ensure (T, 75, 3)
             if split == "train" and np.random.random() < flip_prob:
                 kp = horizontal_flip_keypoints(kp)
-            kps_list.append(kp.reshape(seq_len, -1))
+            kps_list.append(kp)
             labels.append(s.label)
 
         if not kps_list:
@@ -133,12 +269,38 @@ def _load_dataset(
     )
 
 
+def _export_onnx(model: Any, out_path: Path, params: dict[str, Any]) -> None:
+    try:
+        import torch
+        model.eval()
+        seq_len = params.get("sequence_length", 64)
+        dummy = torch.randn(1, seq_len, _NUM_NODES, 3)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.onnx.export(
+            model,
+            dummy,
+            str(out_path),
+            export_params=True,
+            opset_version=params.get("export", {}).get("opset_version", 17),
+            input_names=["keypoints"],
+            output_names=["logits"],
+            dynamic_axes={
+                "keypoints": {0: "batch_size", 1: "num_frames"},
+                "logits":    {0: "batch_size"},
+            },
+        )
+        print(f"Exported ONNX: {out_path}")
+    except Exception as exc:
+        print(f"ONNX export warning: {exc}")
+
+
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+
 def run(params_path: str = "params.yaml", dry_run: bool = False,
         slovo_root: str | None = None) -> dict[str, Any]:
     cfg = get_settings()
     params = _load_params(params_path)
     gesture_params = params.get("gesture", {})
-    data_params = params.get("data", {})
 
     seed = params.get("data", {}).get("random_seed", cfg.random_seed)
     _set_seeds(seed)
@@ -156,6 +318,7 @@ def run(params_path: str = "params.yaml", dry_run: bool = False,
         "pipeline": "train_gesture",
         "architecture": gesture_params.get("model_architecture", "stgcn"),
         "dataset_version": dataset_info.get("dvc_hash", "unknown"),
+        "num_nodes": str(_NUM_NODES),
     }
 
     with tracker.start_run(
@@ -171,70 +334,72 @@ def run(params_path: str = "params.yaml", dry_run: bool = False,
             print(f"[dry-run] Would start training run {run_id}")
             return {"run_id": run_id, "dry_run": True}
 
-        # Load data
-        seq_len  = gesture_params.get("sequence_length", 30)
-        flip_p   = gesture_params.get("augmentation", {}).get("flip_prob", 0.5)
+        seq_len = gesture_params.get("sequence_length", 64)
+        flip_p  = gesture_params.get("augmentation", {}).get("flip_prob", 0.5)
         X_train, y_train, class_names = _load_dataset(
             dataset_path, "train", slovo_root=slovo_root, seq_len=seq_len, flip_prob=flip_p)
         X_val, y_val, _ = _load_dataset(
-            dataset_path, "val", slovo_root=slovo_root, seq_len=seq_len, flip_prob=0.0)
+            dataset_path, "val",   slovo_root=slovo_root, seq_len=seq_len, flip_prob=0.0)
 
-        model = _build_model(gesture_params)
-
-        # Training loop
-        epochs = gesture_params.get("epochs", 100)
-        lr = gesture_params.get("learning_rate", 0.001)
-        patience = gesture_params.get("early_stopping_patience", 10)
-        best_val_f1 = 0.0
-        no_improve = 0
-        best_ckpt = cfg.models_path / "gesture_classifier_best.pt"
+        num_classes = gesture_params.get("num_classes", 1000)
+        model = _build_stgcn(num_classes)
 
         try:
             import torch
             import torch.nn as nn
             from torch.utils.data import TensorDataset, DataLoader
 
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model = model.to(device)
+            print(f"Training on {device}")
+
             X_t = torch.tensor(X_train, dtype=torch.float32)
             y_t = torch.tensor(y_train, dtype=torch.long)
-            X_v = torch.tensor(X_val, dtype=torch.float32)
-            y_v = torch.tensor(y_val, dtype=torch.long)
+            X_v = torch.tensor(X_val,   dtype=torch.float32).to(device)
+            y_v = torch.tensor(y_val,   dtype=torch.long)
 
             optimizer = torch.optim.Adam(
-                model.parameters(), lr=lr,
+                model.parameters(), lr=gesture_params.get("learning_rate", 0.001),
                 weight_decay=gesture_params.get("weight_decay", 1e-4),
             )
+            epochs = gesture_params.get("epochs", 100)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
             criterion = nn.CrossEntropyLoss()
             loader = DataLoader(
                 TensorDataset(X_t, y_t),
                 batch_size=gesture_params.get("batch_size", 32),
                 shuffle=True,
+                num_workers=0,
             )
+
+            patience = gesture_params.get("early_stopping_patience", 10)
+            best_val_f1 = 0.0
+            no_improve = 0
+            best_ckpt = cfg.models_path / "gesture_classifier_best.pt"
 
             for epoch in range(1, epochs + 1):
                 model.train()
                 epoch_loss = 0.0
                 for xb, yb in loader:
+                    xb, yb = xb.to(device), yb.to(device)
                     optimizer.zero_grad()
                     loss = criterion(model(xb), yb)
                     loss.backward()
                     optimizer.step()
                     epoch_loss += loss.item()
-
                 scheduler.step()
 
-                # Validation
                 model.eval()
                 with torch.no_grad():
                     val_logits = model(X_v)
-                    val_pred = val_logits.argmax(dim=1).numpy().tolist()
+                    val_pred = val_logits.argmax(dim=1).cpu().numpy().tolist()
 
                 val_metrics = compute_gesture_metrics(y_v.numpy().tolist(), val_pred, class_names)
                 tracker.log_metrics({
-                    "train_loss": epoch_loss / len(loader),
-                    "val_accuracy": val_metrics.accuracy,
-                    "val_f1_weighted": val_metrics.f1_weighted,
-                    "lr": scheduler.get_last_lr()[0],
+                    "train_loss":       epoch_loss / len(loader),
+                    "val_accuracy":     val_metrics.accuracy,
+                    "val_f1_weighted":  val_metrics.f1_weighted,
+                    "lr":               scheduler.get_last_lr()[0],
                 }, step=epoch)
 
                 if val_metrics.f1_weighted > best_val_f1:
@@ -247,7 +412,6 @@ def run(params_path: str = "params.yaml", dry_run: bool = False,
                         print(f"Early stopping at epoch {epoch}")
                         break
 
-            # Save final checkpoint
             final_ckpt = cfg.models_path / "gesture_classifier.pt"
             torch.save(model.state_dict(), final_ckpt)
             tracker.log_artifact(final_ckpt, "checkpoints")
@@ -255,20 +419,17 @@ def run(params_path: str = "params.yaml", dry_run: bool = False,
         except ImportError as exc:
             raise RuntimeError("PyTorch required for training") from exc
 
-        # Export to ONNX (triggers eval pipeline via dvc repro)
         onnx_path = cfg.models_path / "gesture_classifier.onnx"
         _export_onnx(model, onnx_path, gesture_params)
         tracker.log_artifact(onnx_path, "onnx")
 
-        # Final validation metrics
         model.eval()
         with torch.no_grad():
-            final_pred = model(X_v).argmax(dim=1).numpy().tolist()
+            final_pred = model(X_v).argmax(dim=1).cpu().numpy().tolist()
         final_metrics = compute_gesture_metrics(y_v.numpy().tolist(), final_pred, class_names)
         tracker.log_metrics(final_metrics.to_mlflow_dict())
         tracker.set_tag("best_val_f1", f"{best_val_f1:.4f}")
 
-        # Register in MLflow Model Registry
         registered = registry.register_model(
             model_name=cfg.gesture_model_name,
             onnx_path=onnx_path,
@@ -276,45 +437,24 @@ def run(params_path: str = "params.yaml", dry_run: bool = False,
             metrics=final_metrics.to_mlflow_dict(),
             params={k: str(v) for k, v in gesture_params.items()},
             tags=run_tags,
-            description=f"STGCN gesture classifier, {final_metrics.n_classes} classes",
+            description=(
+                f"ST-GCN gesture classifier — {num_classes} RSL classes, "
+                f"{_NUM_NODES} MediaPipe nodes, seq_len={seq_len}"
+            ),
         )
 
-        # Write DVC metrics report
         report = {**final_metrics.to_mlflow_dict(), "run_id": run_id}
         if registered:
             report["registry_version"] = registered.version
         (reports_path / "gesture_train_metrics.json").write_text(json.dumps(report, indent=2))
 
         print(f"Training complete: accuracy={final_metrics.accuracy:.4f} "
-              f"f1={final_metrics.f1_weighted:.4f} "
-              f"run_id={run_id}")
+              f"f1={final_metrics.f1_weighted:.4f} run_id={run_id}")
         return report
 
 
-def _export_onnx(model: Any, out_path: Path, params: dict[str, Any]) -> None:
-    try:
-        import torch
-        model.eval()
-        seq_len = params.get("sequence_length", 30)
-        dummy = torch.randn(1, seq_len * 33 * 3)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.onnx.export(
-            model,
-            dummy,
-            str(out_path),
-            export_params=True,
-            opset_version=params.get("export", {}).get("opset_version", 17),
-            input_names=["input"],
-            output_names=["logits"],
-            dynamic_axes={"input": {0: "batch_size"}, "logits": {0: "batch_size"}},
-        )
-        print(f"Exported ONNX: {out_path}")
-    except Exception as exc:
-        print(f"ONNX export warning: {exc}")
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train gesture classifier")
+    parser = argparse.ArgumentParser(description="Train ST-GCN gesture classifier")
     parser.add_argument("--params", default="params.yaml")
     parser.add_argument("--slovo-root", default=None,
                         help="Path to Slovo dataset root (fallback if processed data absent)")

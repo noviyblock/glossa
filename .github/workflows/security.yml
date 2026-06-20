@@ -105,7 +105,6 @@ jobs:
           - asr_service
           - nlp_service
           - tts_service
-          - max_adapter
 
     steps:
       - uses: actions/checkout@v4

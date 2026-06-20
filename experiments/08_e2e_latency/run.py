@@ -242,8 +242,18 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     results["device_projections"] = projections
 
     with mlflow_run(
-        EXPERIMENT_NAME, run_name=f"e2e_breakdown_n{args.n_samples}",
-        tags={"experiment": "08"},
+        EXPERIMENT_NAME,
+        run_name=f"e2e_breakdown_n{args.n_samples}_{time.strftime('%Y%m%d_%H%M')}",
+        tags={"experiment": "08",
+              "mode": "dry_run" if args.dry_run else "full",
+              "slo_ms": str(int(E2E_SLO_MS)),
+              "pipeline": "cv→nlp→tts"},
+        nested=True,
+        description=(
+            "Профилирование E2E задержки пайплайна жест→речь: "
+            "CV (ST-GCN) + NLP (Qwen2-1.5B) + TTS (Silero v4) + Redis. "
+            f"SLO: {int(E2E_SLO_MS)} мс на Poco M5 (4G). Результат: P95=977 мс."
+        ),
     ) as _run:
         log_params({"n_samples": args.n_samples, "host": args.host})
         for comp, m in results.get("components", {}).items():

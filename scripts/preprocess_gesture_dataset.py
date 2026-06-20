@@ -55,6 +55,7 @@ def run(
     n_samples: int | None = None,
     dry_run: bool = False,
     seed: int = 42,
+    label_mapping_path: str | None = None,
 ) -> None:
     t0 = time.perf_counter()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -73,8 +74,8 @@ def run(
 
         from experiments.shared.slovo_dataset import SlovoDataset
         print(f"Loading SlovoDataset from {slovo_root} ...")
-        ds = SlovoDataset(slovo_root)
-        class_names = sorted(ds.label_map.keys())
+        ds = SlovoDataset(slovo_root, label_mapping_path=label_mapping_path)
+        class_names = [k for k, _ in sorted(ds.label_map.items(), key=lambda x: x[1])]
         samples = ds.samples
         if n_samples:
             samples = samples[:n_samples]
@@ -152,6 +153,16 @@ def run(
     (out_dir / "class_names.json").write_text(
         json.dumps(class_names, ensure_ascii=False, indent=2))
 
+    # Copy / generate label_mapping.json so downstream stages (exp 09) can load it
+    if label_mapping_path and Path(label_mapping_path).exists():
+        import shutil
+        shutil.copy2(label_mapping_path, out_dir / "label_mapping.json")
+    else:
+        id_map = {name: i for i, name in enumerate(class_names)}
+        (out_dir / "label_mapping.json").write_text(
+            json.dumps({"label_to_id": id_map, "num_classes": len(id_map)},
+                       ensure_ascii=False, indent=2))
+
     # Record preprocessing config for reproducibility
     stats["preprocessing"] = {
         "target_len":       cfg.target_len,
@@ -181,14 +192,16 @@ if __name__ == "__main__":
     d_params = params.get("data", {})
 
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--slovo-root",  default=None)
-    p.add_argument("--out-dir",     default="data/gestures/processed")
-    p.add_argument("--target-len",  type=int,   default=g_params.get("sequence_length", 30))
-    p.add_argument("--flip-prob",   type=float, default=g_params.get("augmentation", {}).get("flip_prob", 0.5))
-    p.add_argument("--noise-std",   type=float, default=g_params.get("augmentation", {}).get("noise_std", 0.01))
-    p.add_argument("--n-samples",   type=int,   default=None, help="Limit dataset size (debugging)")
-    p.add_argument("--seed",        type=int,   default=d_params.get("random_seed", 42))
-    p.add_argument("--dry-run",     action="store_true")
+    p.add_argument("--slovo-root",     default=None)
+    p.add_argument("--out-dir",        default="data/gestures/processed")
+    p.add_argument("--target-len",     type=int,   default=g_params.get("sequence_length", 30))
+    p.add_argument("--flip-prob",      type=float, default=g_params.get("augmentation", {}).get("flip_prob", 0.5))
+    p.add_argument("--noise-std",      type=float, default=g_params.get("augmentation", {}).get("noise_std", 0.01))
+    p.add_argument("--label-mapping",  default=d_params.get("label_mapping_path", ""),
+                   help="Path to label_mapping.json from exp 00 EDA")
+    p.add_argument("--n-samples",      type=int,   default=None, help="Limit dataset size (debugging)")
+    p.add_argument("--seed",           type=int,   default=d_params.get("random_seed", 42))
+    p.add_argument("--dry-run",        action="store_true")
     args = p.parse_args()
 
     cfg = PreprocessConfig(
@@ -203,4 +216,5 @@ if __name__ == "__main__":
         n_samples=args.n_samples,
         dry_run=args.dry_run,
         seed=args.seed,
+        label_mapping_path=args.label_mapping or None,
     )

@@ -9,168 +9,111 @@ stages:
     params:
       - params.yaml:
           - asr.model_size
-    outs:
-      - models/whisper:
-          cache: true
+    # models/whisper tracked via `dvc add`
 
   download_silero_tts:
     cmd: >
       python -c "
-      import torch;
+      import torch, os;
+      os.makedirs('models/silero', exist_ok=True);
       model, _ = torch.hub.load('snakers4/silero-models', 'silero_tts',
                                 language='ru', speaker='v4_ru');
       torch.save(model, 'models/silero/silero_tts_ru.pt')
       "
-    outs:
-      - models/silero:
-          cache: true
+    # models/silero tracked via `dvc add`
 
-  download_bge_m3:
-    cmd: >
-      python -c "
-      from sentence_transformers import SentenceTransformer;
-      SentenceTransformer('BAAI/bge-m3', cache_folder='models/bge-m3')
-      "
-    outs:
-      - models/bge-m3:
-          cache: true
-
-  # ── Dataset preprocessing ──────────────────────────────────────────────────
-  eda_slovo:
-    cmd: python notebooks/01_eda_slovo.py --slovo-root ${data.slovo_root} --out-dir experiments/results/eda
+  # ── Data pipeline ──────────────────────────────────────────────────────────
+  preprocess:
+    cmd: python mlops/pipelines/preprocess.py
     deps:
-      - notebooks/01_eda_slovo.py
-      - experiments/shared/slovo_dataset.py
-      - experiments/shared/preprocessing.py
-    params:
-      - params.yaml:
-          - data.slovo_root
-    metrics:
-      - experiments/results/eda/eda_results.json:
-          cache: false
-
-  preprocess_gesture_dataset:
-    cmd: >
-      python scripts/preprocess_gesture_dataset.py
-      --slovo-root ${data.slovo_root}
-      --out-dir data/gestures/processed
-      --target-len ${gesture.sequence_length}
-      --flip-prob ${gesture.augmentation.flip_prob}
-      --noise-std ${gesture.augmentation.noise_std}
-      --seed ${data.random_seed}
-    deps:
-      - scripts/preprocess_gesture_dataset.py
-      - experiments/shared/slovo_dataset.py
-      - experiments/shared/preprocessing.py
+      - data/raw/slovo/
+      - params.yaml
+      - mlops/pipelines/preprocess.py
     params:
       - params.yaml:
           - data.random_seed
-          - data.slovo_root
           - data.train_split
           - data.val_split
           - data.test_split
-          - gesture.sequence_length
-          - gesture.augmentation
-    outs:
-      - data/gestures/processed:
-          cache: true
-    metrics:
-      - data/gestures/processed/preprocessing_stats.json:
-          cache: false
+          - gesture.window_size
+          - gesture.num_joints
+    # data/processed/ tracked via `dvc add` after running this stage locally
 
   # ── Gesture training ───────────────────────────────────────────────────────
   train_gesture:
-    cmd: python -m mlops.pipelines.train_gesture
+    cmd: python mlops/pipelines/train_gesture.py
     deps:
-      - data/gestures/processed
+      - data/processed/
+      - params.yaml
       - mlops/pipelines/train_gesture.py
-      - mlops/tracking/metrics.py
     params:
       - params.yaml:
           - gesture
           - data.random_seed
-    outs:
-      - models/gesture_classifier.pt:
-          cache: true
+    # models/gesture_classifier.onnx and models/norm_stats.npz are tracked
+    # via `dvc add` (pre-trained artifacts). Remove from outs to allow that.
     metrics:
-      - mlops/reports/gesture_train_metrics.json:
+      - reports/gesture_metrics.json:
           cache: false
-
-  # ── Gesture ONNX export ────────────────────────────────────────────────────
-  export_gesture_classifier:
-    cmd: python scripts/export_gesture_classifier.py
-    deps:
-      - scripts/export_gesture_classifier.py
-      - models/gesture_classifier.pt
-    params:
-      - params.yaml:
-          - gesture.sequence_length
-          - gesture.export
-    outs:
-      - models/gesture_classifier.onnx:
-          cache: true
 
   # ── Gesture evaluation ─────────────────────────────────────────────────────
   eval_gesture:
-    cmd: python -m mlops.pipelines.eval_gesture
+    cmd: python mlops/pipelines/eval_gesture.py
     deps:
       - models/gesture_classifier.onnx
-      - data/gestures/processed/test
+      - data/processed/val/
       - mlops/pipelines/eval_gesture.py
+    metrics:
+      - reports/gesture_eval.json:
+          cache: false
+
+  # ── NLP training (QLoRA) ───────────────────────────────────────────────────
+  train_nlp:
+    cmd: python mlops/pipelines/train_nlp.py
+    deps:
+      - data/translations/
+      - params.yaml
+      - mlops/pipelines/train_nlp.py
     params:
       - params.yaml:
-          - data.test_split
+          - nlp
+    # models/qwen2_lora/ and models/qwen2_merged_qwen2_1.5b/ tracked via `dvc add`
     metrics:
-      - mlops/reports/gesture_eval_metrics.json:
+      - reports/nlp_train_metrics.json:
           cache: false
-    plots:
-      - mlops/reports/gesture_confusion_matrix.csv:
-          cache: false
-          x: predicted
-          y: actual
 
   # ── NLP evaluation ─────────────────────────────────────────────────────────
   eval_nlp:
-    cmd: python -m mlops.pipelines.eval_nlp --modality nlp
+    cmd: python mlops/pipelines/eval_nlp.py
     deps:
-      - data/translations/test
-      - mlops/pipelines/eval_nlp.py
-    metrics:
-      - mlops/reports/nlp_eval_metrics.json:
-          cache: false
-
-  # ── ASR evaluation ─────────────────────────────────────────────────────────
-  eval_asr:
-    cmd: python -m mlops.pipelines.eval_nlp --modality asr
-    deps:
-      - data/audio/test
+      - models/qwen2_merged_qwen2_1.5b/
+      - data/translations/rsl_gloss_val_slovo_synth.csv
       - mlops/pipelines/eval_nlp.py
     params:
       - params.yaml:
-          - asr
+          - nlp.max_new_tokens
     metrics:
-      - mlops/reports/asr_eval_metrics.json:
+      - reports/nlp_eval.json:
           cache: false
 
-  # ── Benchmarking ───────────────────────────────────────────────────────────
-  benchmark:
-    cmd: python -m mlops.pipelines.benchmark
+  # ── Architecture-justification experiments ─────────────────────────────────
+  exp_00_compare_models:
+    cmd: python -m experiments.00_compare_models.run --dry-run
     deps:
-      - models/gesture_classifier.onnx
-      - mlops/pipelines/benchmark.py
-    params:
-      - params.yaml:
-          - benchmark
+      - experiments/00_compare_models/run.py
+      - experiments/shared/mlflow_utils.py
     metrics:
-      - mlops/reports/benchmark_results.json:
+      - experiments/results/00_compare_models/results.json:
           cache: false
 
-  # ── Architecture-justification experiments ────────────────────────────────
   exp_01_gesture_backbone:
-    cmd: python -m experiments.01_gesture_backbone.run --dry-run
+    cmd: >
+      python -m experiments.01_gesture_backbone.run
+      --n-samples ${experiments.gesture.n_samples}
+      --seq-len ${experiments.gesture.seq_len}
+      --dry-run
     deps:
       - experiments/01_gesture_backbone/run.py
-      - experiments/shared/slovo_dataset.py
       - experiments/shared/mlflow_utils.py
     params:
       - params.yaml:
@@ -181,10 +124,12 @@ stages:
           cache: false
 
   exp_02_sliding_window:
-    cmd: python -m experiments.02_sliding_window.run --dry-run
+    cmd: >
+      python -m experiments.02_sliding_window.run
+      --n-samples ${experiments.gesture.n_samples}
+      --dry-run
     deps:
       - experiments/02_sliding_window/run.py
-      - experiments/shared/slovo_dataset.py
       - experiments/shared/mlflow_utils.py
     params:
       - params.yaml:
@@ -196,7 +141,10 @@ stages:
           cache: false
 
   exp_03_inference_acceleration:
-    cmd: python -m experiments.03_inference_acceleration.run --dry-run
+    cmd: >
+      python -m experiments.03_inference_acceleration.run
+      --n-samples ${experiments.acceleration.n_samples}
+      --dry-run
     deps:
       - experiments/03_inference_acceleration/run.py
       - experiments/shared/mlflow_utils.py
@@ -209,7 +157,10 @@ stages:
           cache: false
 
   exp_04_asr_comparison:
-    cmd: python -m experiments.04_asr_comparison.run --dry-run
+    cmd: >
+      python -m experiments.04_asr_comparison.run
+      --n-samples ${experiments.asr.n_samples}
+      --dry-run
     deps:
       - experiments/04_asr_comparison/run.py
       - experiments/shared/mlflow_utils.py
@@ -222,7 +173,10 @@ stages:
           cache: false
 
   exp_05_nlp_llm_size:
-    cmd: python -m experiments.05_nlp_llm_size.run --dry-run
+    cmd: >
+      python -m experiments.05_nlp_llm_size.run
+      --n-samples ${experiments.nlp.n_samples}
+      --dry-run
     deps:
       - experiments/05_nlp_llm_size/run.py
       - experiments/shared/mlflow_utils.py
@@ -235,8 +189,11 @@ stages:
       - experiments/results/05_nlp_llm_size/results.json:
           cache: false
 
-  exp_06_rag_ablation:
-    cmd: python -m experiments.06_rag_ablation.run --dry-run
+  exp_06_nlp_cache:
+    cmd: >
+      python -m experiments.06_rag_ablation.run
+      --n-samples ${experiments.rag.n_samples}
+      --dry-run
     deps:
       - experiments/06_rag_ablation/run.py
       - experiments/shared/mlflow_utils.py
@@ -247,8 +204,11 @@ stages:
       - experiments/results/06_rag_ablation/results.json:
           cache: false
 
-  exp_07_tts_utmos:
-    cmd: python -m experiments.07_tts_utmos.run --dry-run
+  exp_07_tts_quality:
+    cmd: >
+      python -m experiments.07_tts_utmos.run
+      --n-samples ${experiments.tts.n_samples}
+      --dry-run
     deps:
       - experiments/07_tts_utmos/run.py
       - experiments/shared/mlflow_utils.py
@@ -259,8 +219,27 @@ stages:
       - experiments/results/07_tts_utmos/results.json:
           cache: false
 
+  exp_08_e2e_latency:
+    cmd: >
+      python -m experiments.08_e2e_latency.run
+      --n-samples ${experiments.e2e.n_samples}
+      --dry-run
+    deps:
+      - experiments/08_e2e_latency/run.py
+      - experiments/shared/mlflow_utils.py
+    params:
+      - params.yaml:
+          - experiments.e2e.n_samples
+          - experiments.e2e.slo_ms
+    metrics:
+      - experiments/results/08_e2e_latency/results.json:
+          cache: false
+
   exp_09_cross_validation:
-    cmd: python -m experiments.09_cross_validation.run --dry-run
+    cmd: >
+      python -m experiments.09_cross_validation.run
+      --k-folds ${experiments.cross_val.k_folds}
+      --dry-run
     deps:
       - experiments/09_cross_validation/run.py
       - experiments/shared/preprocessing.py
@@ -272,17 +251,4 @@ stages:
           - data.random_seed
     metrics:
       - experiments/results/09_cross_validation/results.json:
-          cache: false
-
-  exp_08_e2e_latency:
-    cmd: python -m experiments.08_e2e_latency.run --dry-run
-    deps:
-      - experiments/08_e2e_latency/run.py
-      - experiments/shared/mlflow_utils.py
-    params:
-      - params.yaml:
-          - experiments.e2e.n_samples
-          - experiments.e2e.slo_ms
-    metrics:
-      - experiments/results/08_e2e_latency/results.json:
           cache: false

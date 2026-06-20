@@ -11,7 +11,12 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "mlflow>=2.12",
+    "dagshub>=0.3",
     "pyyaml>=6.0",
+    "papermill>=2.6",
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -37,13 +42,6 @@ nlp = [
     "peft>=0.10",
     "accelerate>=0.29",
 ]
-rag = [
-    "qdrant-client>=1.8",
-    "sentence-transformers>=2.7",
-    "requests>=2.31",
-    "sacrebleu>=2.4",
-    "rouge-score>=0.1.2",
-]
 tts = [
     "torch>=2.2",
     "torchaudio>=2.2",
@@ -54,7 +52,7 @@ latency = [
     "redis[hiredis]>=5.0",
 ]
 all = [
-    "glossa-experiments[gesture,asr,nlp,rag,tts,latency]",
+    "glossa-experiments[gesture,asr,nlp,tts,latency]",
 ]
 dev = [
     "glossa-experiments[all]",

@@ -1,0 +1,18 @@
+{
+  "bleu4_top1": 83.9138301714074,
+  "bleu4_topk": 14.55872551773084,
+  "bleu4_delta": -69.35510465367656,
+  "rouge_l_top1": 0.0,
+  "rouge_l_topk": 0.0,
+  "rouge_l_delta": 0.0,
+  "p95_top1_ms": 1237.7296421003614,
+  "p95_topk_ms": 5431.501390499897,
+  "n_eval": 200.0,
+  "e2e_rsl_speech_poco_ms": 10138.832014499047,
+  "e2e_speech_rsl_poco_ms": 5991.501390499897,
+  "slo_target_ms": 2000.0,
+  "slo_rsl_speech_pass": false,
+  "slo_speech_rsl_pass": false,
+  "poco_scale_factor": 10.0,
+  "lat_4g_rtt_ms": 150.0
+}

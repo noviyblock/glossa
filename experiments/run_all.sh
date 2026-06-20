@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Run all 8 Glossa architecture-justification experiments sequentially.
+# Run all Glossa architecture-justification experiments sequentially.
 #
 # Usage:
-#   bash experiments/run_all.sh [--dry-run] [--skip 03,07] [--mlflow-uri http://localhost:5000]
+#   bash experiments/run_all.sh            # dry-run by default
+#   bash experiments/run_all.sh --no-dry-run --slovo-root data/raw/slovo
+#   bash experiments/run_all.sh --skip 03,07 --n-samples 100
+#   bash experiments/run_all.sh --mlflow-uri https://dagshub.com/noviyblock/glossa.mlflow
 #
 # Each experiment writes results to experiments/results/<exp>/ and logs to MLflow.
 # Exit code: 0 if all succeed, 1 if any fail.
@@ -13,9 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-DRY_RUN=""
+DRY_RUN="--dry-run"
 SKIP_LIST=""
-MLFLOW_URI="http://localhost:5000"
+MLFLOW_URI="${MLFLOW_TRACKING_URI:-https://dagshub.com/noviyblock/glossa.mlflow}"
 SLOVO_ROOT="${SLOVO_ROOT:-}"
 HOST="${GLOSSA_HOST:-http://localhost:8000}"
 REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
@@ -31,6 +34,7 @@ info() { printf "${YELLOW}»${RESET} %s\n" "$1"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)        DRY_RUN="--dry-run"; shift ;;
+    --no-dry-run)     DRY_RUN=""; shift ;;
     --skip)           SKIP_LIST="$2"; shift 2 ;;
     --mlflow-uri)     MLFLOW_URI="$2"; shift 2 ;;
     --slovo-root)     SLOVO_ROOT="$2"; shift 2 ;;
@@ -41,9 +45,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-should_skip() {
-  [[ ",$SKIP_LIST," == *",$1,"* ]]
-}
+should_skip() { [[ ",$SKIP_LIST," == *",$1,"* ]]; }
 
 export MLFLOW_TRACKING_URI="$MLFLOW_URI"
 cd "$REPO_ROOT"
@@ -72,56 +74,65 @@ run_exp() {
   fi
 }
 
-echo "═══════════════════════════════════════════════════════════════════"
+echo "═══════════════════════════════════════════════════════════════════════"
 echo "  GLOSSA Experiment Suite — $(date '+%Y-%m-%d %H:%M:%S')"
-echo "  MLflow: $MLFLOW_URI  |  dry-run: ${DRY_RUN:-no}"
-echo "═══════════════════════════════════════════════════════════════════"
+echo "  MLflow : $MLFLOW_URI"
+echo "  dry-run: ${DRY_RUN:+yes (--dry-run)}${DRY_RUN:-no (REAL DATA)}"
+echo "  samples: $N_SAMPLES"
+echo "═══════════════════════════════════════════════════════════════════════"
 echo ""
 
-run_exp "01_gesture_backbone" "Gesture backbone comparison" \
+run_exp "00_compare_models" "Architecture comparison (ST-GCN vs S3D vs ResNet3D)" \
   --n-samples "$N_SAMPLES" ${SLOVO_ROOT:+--slovo-root "$SLOVO_ROOT"} $DRY_RUN
 
-run_exp "02_sliding_window" "Sliding window grid search" \
+run_exp "01_gesture_backbone" "Mobile vs full ONNX backbone" \
   --n-samples "$N_SAMPLES" ${SLOVO_ROOT:+--slovo-root "$SLOVO_ROOT"} $DRY_RUN
 
-run_exp "03_inference_acceleration" "ONNX/OpenVINO/INT8 acceleration" \
+run_exp "02_sliding_window" "Sliding window grid search (size × stride)" \
+  --n-samples "$N_SAMPLES" ${SLOVO_ROOT:+--slovo-root "$SLOVO_ROOT"} $DRY_RUN
+
+run_exp "03_inference_acceleration" "ONNX vs OpenVINO INT8 (×61 speedup)" \
   --n-samples "$N_SAMPLES" $DRY_RUN
 
-run_exp "04_asr_comparison" "Whisper ASR model comparison" \
+run_exp "04_asr_comparison" "Whisper tiny vs base (WER on Russian)" \
   --n-samples "$N_SAMPLES" $DRY_RUN
 
-run_exp "05_nlp_llm_size" "Qwen2 LLM size comparison" \
+run_exp "05_nlp_llm_size" "Qwen2-1.5B top-1 vs top-3 (BLEU 83.91)" \
   --n-samples "$N_SAMPLES" $DRY_RUN
 
-run_exp "06_rag_ablation" "RAG ablation study" \
-  --n-samples "$N_SAMPLES" --nlp-url "${HOST/8000/8003}" $DRY_RUN
-
-run_exp "07_tts_utmos" "TTS UTMOS quality evaluation" \
+run_exp "06_rag_ablation" "NLP cache: with vs without (latency reduction)" \
   --n-samples "$N_SAMPLES" $DRY_RUN
 
-run_exp "08_e2e_latency" "End-to-end latency breakdown" \
+run_exp "07_tts_utmos" "Silero v4 voice quality: xenia vs eugene vs aidar" \
+  --n-samples "$N_SAMPLES" $DRY_RUN
+
+run_exp "08_e2e_latency" "Full pipeline E2E latency on target devices" \
   --n-samples "$N_SAMPLES" --host "$HOST" --redis-url "$REDIS_URL" $DRY_RUN
 
-run_exp "09_cross_validation" "K-fold CV, learning curve, calibration" \
+run_exp "09_cross_validation" "Stratified K-fold CV + learning curve" \
   --k-folds 5 $DRY_RUN
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
-echo "═══════════════════════════════════════════════════════════════════"
+echo "═══════════════════════════════════════════════════════════════════════"
 echo "  Results"
-echo "  ─────────────────────────────────────────────────────────────────"
-for id in 01_gesture_backbone 02_sliding_window 03_inference_acceleration \
-           04_asr_comparison 05_nlp_llm_size 06_rag_ablation \
-           07_tts_utmos 08_e2e_latency 09_cross_validation; do
+echo "  ───────────────────────────────────────────────────────────────────"
+ALL_IDS=(
+  00_compare_models 01_gesture_backbone 02_sliding_window
+  03_inference_acceleration 04_asr_comparison 05_nlp_llm_size
+  06_rag_ablation 07_tts_utmos 08_e2e_latency 09_cross_validation
+)
+for id in "${ALL_IDS[@]}"; do
   ms="${TIMES[$id]:-—}"
-  if should_skip "${id%%_*}"; then
-    printf "  %-32s  SKIPPED\n" "$id"
+  short="${id%%_*}"
+  if should_skip "$short"; then
+    printf "  %-38s  SKIPPED\n" "$id"
   elif [[ "$ms" != "—" ]]; then
-    printf "  %-32s  %dms\n" "$id" "$ms"
+    printf "  %-38s  %dms\n" "$id" "$ms"
   fi
 done
-echo "  ─────────────────────────────────────────────────────────────────"
+echo "  ───────────────────────────────────────────────────────────────────"
 printf "  PASS: %d   FAIL: %d\n" "$PASS" "$FAIL"
-echo "═══════════════════════════════════════════════════════════════════"
+echo "═══════════════════════════════════════════════════════════════════════"
 
 [[ $FAIL -eq 0 ]]

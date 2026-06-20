@@ -76,11 +76,10 @@ jobs:
               [asr-service]=8002
               [nlp-service]=8003
               [tts-service]=8004
-              [max-adapter]=8005
             )
 
             FAILED_SVC=""
-            for svc in api-gateway cv-service asr-service nlp-service tts-service max-adapter; do
+            for svc in api-gateway cv-service asr-service nlp-service tts-service; do
               echo "=== Updating $svc ==="
               port="${SVC_PORT[$svc]}"
 

@@ -1,0 +1,15 @@
+{
+  "bleu_4": 28.156384670163995,
+  "rouge_l": 0.0,
+  "val_loss": 0.31399160623550415,
+  "val_ppl": 1.2431424361382455,
+  "train_samples": 1753,
+  "val_samples": 310,
+  "lora_r": 64,
+  "lora_alpha": 128,
+  "epochs": 5,
+  "base_model": "Qwen/Qwen2.5-7B-Instruct",
+  "taiga_pairs": 955,
+  "domain_pairs": 1481,
+  "total_pairs": 2063
+}

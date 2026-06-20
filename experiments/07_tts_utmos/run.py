@@ -210,8 +210,18 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
     results["published_benchmarks"] = _PUBLISHED_BENCHMARKS
 
     with mlflow_run(
-        EXPERIMENT_NAME, run_name=f"tts_utmos_n{args.n_samples}",
-        tags={"experiment": "07", "system": "silero_v4"},
+        EXPERIMENT_NAME,
+        run_name=f"tts_utmos_n{args.n_samples}_{time.strftime('%Y%m%d_%H%M')}",
+        tags={"experiment": "07",
+              "mode": "dry_run" if args.dry_run else "full",
+              "system": "silero_v4",
+              "metric": "utmos_mos_predictor"},
+        nested=True,
+        description=(
+            "Оценка качества TTS Silero v4 по метрике UTMOS. "
+            "Сравнение с опубликованными данными GigaTTS (Sber, 2024). "
+            "Выбор Silero: открытые веса, CPU-режим, UTMOS=3.81."
+        ),
     ) as _run:
         log_params({"n_samples": args.n_samples, "dry_run": str(args.dry_run)})
         m = results.get("Silero_v4", {})

@@ -1,70 +1,60 @@
-# Development overrides — hot-reload, debug ports, relaxed resource limits
+# Development overrides — hot-reload, debug logging
+# Applied automatically by: docker compose up
 name: glossa
 
 services:
-  api-gateway:
-    build:
-      target: development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
-    volumes:
-      - ./services/api_gateway:/app:cached
-      - ./libs:/libs:cached
-    environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
-      - LOG_FORMAT=text
-
   cv-service:
     build:
       target: development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --log-level debug
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload --log-level debug
     volumes:
       - ./services/cv_service:/app:cached
-      - ./libs:/libs:cached
+      - ./models:/models:ro
+      - ./data:/data:ro
     environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
 
   asr-service:
     build:
       target: development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload --log-level debug
+    command: uvicorn main:app --host 0.0.0.0 --port 8002 --reload --log-level debug
     volumes:
       - ./services/asr_service:/app:cached
-      - ./libs:/libs:cached
+      - ./models:/models:ro
     environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
 
   nlp-service:
     build:
       target: development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload --log-level debug
+    command: uvicorn main:app --host 0.0.0.0 --port 8003 --reload --log-level debug
     volumes:
       - ./services/nlp_service:/app:cached
-      - ./libs:/libs:cached
+      - ./models:/models:ro
+      - ./data:/data:ro
     environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
 
   tts-service:
     build:
       target: development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8004 --reload --log-level debug
+    command: uvicorn main:app --host 0.0.0.0 --port 8004 --reload --log-level debug
     volumes:
       - ./services/tts_service:/app:cached
-      - ./libs:/libs:cached
+      - ./models:/models:ro
     environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
 
-  max-adapter:
+  api-gateway:
     build:
       target: development
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload --log-level debug
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
     volumes:
-      - ./services/max_adapter:/app:cached
-      - ./libs:/libs:cached
+      - ./services/api_gateway:/app:cached
     environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG

@@ -1,222 +1,193 @@
-# Glossa — Multimodal RSL Translation Platform
+# Glossa — Двунаправленный перевод РЖЯ
 
-Production-ready monorepo for real-time **Russian Sign Language (RSL)** bidirectional translation.
-Designed to eliminate 2–4 hour interpreter wait times in medical and banking contexts.
+Система перевода **русского жестового языка** в реальном времени.  
+Дипломный проект. Целевая задержка ≤ 2 000 мс (P95) на устройстве Poco M5.
 
-## Architecture
+---
+
+## Архитектура
 
 ```
-Client (video / audio)
-         │
-         ▼
-┌──────────────────┐
-│   API Gateway    │  ← WebSocket + REST, rate limiting, CORS
-│     :8000        │
-└────────┬─────────┘
-         │  Redis Streams (event-driven)
-    ┌────┼──────────────────┐
-    ▼    ▼                  ▼
-┌────────┐ ┌────────┐ ┌──────────────┐
-│  CV    │ │  ASR   │ │     NLP      │
-│ :8001  │ │ :8002  │ │    :8003     │
-│MediaP. │ │Faster  │ │ Qwen2-1.5B   │
-│+ONNX/  │ │Whisper │ │ LangGraph    │
-│OpenVINO│ │(base)  │ │ + RAG/Qdrant │
-└────────┘ └────────┘ └──────────────┘
-    │                        │
-    ▼                        ▼
-┌──────────┐       ┌──────────────────┐
-│   TTS    │       │   MAX Adapter    │
-│  :8004   │       │     :8005        │
-│  Silero  │       │  HW-accelerated  │
-│   v4     │       │    inference     │
-└──────────┘       └──────────────────┘
-              │
-   ┌──────────┼──────────────┐
-   │  Redis   │  Qdrant      │  OTel/Jaeger/Prometheus/Grafana
-   └──────────┴──────────────┘
+Клиент Flutter (мобильный / веб)
+          │  WebSocket  │  REST
+          ▼             ▼
+┌────────────────────────────────┐
+│      API Gateway :8000         │  WebSocket-оркестратор + REST
+└──────┬─────────────────┬───────┘
+       │    Redis Streams │ (cv:results · asr:results · nlp:results)
+  ┌────▼────┐        ┌────▼────┐    ┌──────────────┐
+  │   CV    │        │   ASR   │    │     NLP      │
+  │ :8001   │        │ :8002   │    │    :8003     │
+  │MediaPipe│        │ Faster  │    │ Qwen2-1.5B   │
+  │+ONNX/OV │        │ Whisper │    │  (QLoRA)     │
+  └────┬────┘        └────┬────┘    └──────┬───────┘
+       │                  │                │
+       └──────────────────┴────────────────┘
+                                           │
+                                  ┌────────▼────────┐
+                                  │   TTS :8004     │
+                                  │   Silero v4     │
+                                  └─────────────────┘
 ```
 
-**RSL → Speech:** Camera frames → CV (MediaPipe + ONNX) → NLP (Qwen2 + RAG) → TTS (Silero) → Audio output
+**РЖЯ → Текст:** кадры камеры → CV (скелет MediaPipe + ST-GCN) → NLP (глоссы → русский) → TTS (аудио)  
+**Текст → РЖЯ:** текст/микрофон → ASR (Whisper) → NLP (русский → глоссы) → вывод глосс
 
-**Speech → RSL:** Microphone → ASR (faster-whisper) → NLP → Gloss sequence display
+---
 
-## Quick Start
+## Быстрый старт
 
 ```bash
-# 1. Configure environment
-cp .env.example .env
+# 1. Клонировать репозиторий и настроить окружение
+git clone https://github.com/noviyblock/glossa.git && cd glossa
+cp .env.example .env          # проверить настройки (секреты не нужны для dev)
 
-# 2. Pull model artifacts
-dvc pull
+# 2. Скачать модели с Google Drive
+make models
+#   → models/gesture_classifier_mobile.onnx
+#   → models/stgcn_topk_int8/
+#   → models/norm_stats.npz
+#   → models/qwen2_merged_qwen2_1.5b/
+#   Или через DVC (если есть доступ к DagsHub):
+#   dvc pull
 
-# 3. Initialise Qdrant collections and seed glossary
-docker compose up -d qdrant redis
-python scripts/init_qdrant.py --seed
+# 3. Скачать индекс классов датасета
+dvc pull data/idx_to_class.json
 
-# 4. Start all services (hot-reload)
-make dev
+# 4. Запустить все сервисы
+make dev                      # горячая перезагрузка (рекомендуется)
+# make up                     # фоновый режим
 
-# 5. Open API docs
-open http://localhost:8000/docs
+# 5. Открыть интерфейсы
+open http://localhost:8000/docs   # Swagger / ReDoc
+open http://localhost:5000        # MLflow — эксперименты
+open http://localhost:3001        # Grafana  (admin / admin)
+open http://localhost:9090        # Prometheus
 ```
 
-## Services
+---
 
-| Service              | Port | Technology                            | Role                        |
-|----------------------|------|---------------------------------------|-----------------------------|
-| `api-gateway`        | 8000 | FastAPI + WebSocket                   | Entry point, orchestration  |
-| `cv-service`         | 8001 | MediaPipe Holistic + ONNX/OpenVINO    | Skeleton extraction + STGCN |
-| `asr-service`        | 8002 | faster-whisper base (CTranslate2)     | Speech-to-text              |
-| `nlp-service`        | 8003 | Qwen2-1.5B + LangGraph + Qdrant       | Gloss translation + RAG     |
-| `tts-service`        | 8004 | Silero TTS v4                         | Text-to-speech              |
-| `max-adapter`        | 8005 | Modular MAX SDK                       | HW-accelerated inference    |
+## Сервисы
 
-## Project Structure
+| Сервис          | Порт | Технология                             | Назначение                  |
+|-----------------|------|----------------------------------------|-----------------------------|
+| `api-gateway`   | 8000 | FastAPI + WebSocket                    | Точка входа, оркестрация    |
+| `cv-service`    | 8001 | MediaPipe Holistic + ONNX / OpenVINO   | Скелет + классификатор жест |
+| `asr-service`   | 8002 | faster-whisper base (int8)             | Речь → текст                |
+| `nlp-service`   | 8003 | Qwen2-1.5B-Instruct (QLoRA)            | Перевод глоссы ↔ русский    |
+| `tts-service`   | 8004 | Silero TTS v4                          | Текст → речь                |
+| `redis`         | 6379 | Redis 7.2 Streams                      | Шина событий, сессии        |
+| `mlflow`        | 5000 | MLflow + SQLite                        | Трекинг экспериментов       |
+| `prometheus`    | 9090 | Prometheus                             | Сбор метрик                 |
+| `grafana`       | 3001 | Grafana                                | Дашборды                    |
 
-```
-glossa/
-├── services/                    # Microservices (one per domain)
-│   ├── api_gateway/             # WebSocket + REST gateway
-│   ├── cv_service/              # MediaPipe keypoint extraction
-│   ├── gesture_recognition/     # STGCN skeleton-based classifier
-│   ├── asr_service/             # faster-whisper transcription
-│   ├── nlp_service/             # Qwen2 + LangGraph + RAG translation
-│   ├── tts_service/             # Silero TTS synthesis
-│   └── max_adapter/             # MAX SDK inference bridge
-├── libs/
-│   ├── common/                  # Shared: schemas, messaging, telemetry, logging
-│   └── max_sdk/                 # Typed MAX SDK wrapper
-├── mlops/                       # ML lifecycle tooling
-│   ├── pipelines/               # train_gesture, eval_gesture, eval_nlp, benchmark
-│   ├── tracking/                # MLflow experiment tracker, metrics dataclasses
-│   ├── registry/                # ONNX model registry + promotion gates
-│   └── dataset/                 # DVC-tracked dataset versioning
-├── experiments/                 # Architecture justification (diploma)
-│   ├── shared/                  # SlovoDataset loader, MLflow utils
-│   ├── 01_gesture_backbone/     # STGCN vs S3D vs ResNet3D
-│   ├── 02_sliding_window/       # Window×stride grid search
-│   ├── 03_inference_acceleration/ # PyTorch→ONNX→OpenVINO→INT8
-│   ├── 04_asr_comparison/       # Whisper tiny/base/small
-│   ├── 05_nlp_llm_size/         # Qwen2-0.5B/1.5B/7B
-│   ├── 06_rag_ablation/         # LLM-only vs RAG-general vs RAG-domain
-│   ├── 07_tts_utmos/            # Silero v4 UTMOS vs GigaTTS reference
-│   ├── 08_e2e_latency/          # Full pipeline + mobile device projection
-│   └── run_all.sh               # Run all 8 experiments
-├── benchmarks/                  # Load & performance testing
-│   ├── runners/                 # latency, stress, redis, queue runners
-│   ├── profiling/               # CPU/GPU profilers (py-spy, pynvml)
-│   ├── synthetic/               # WAV/keypoint workload generators
-│   ├── reporters/               # HTML/JSON report builder
-│   ├── locustfile.py            # Locust load test scenarios
-│   └── config.py                # Device profiles, SLO thresholds
-├── infra/
-│   ├── docker/                  # Base Dockerfiles
-│   ├── k8s/                     # Helm charts (K8s migration path)
-│   ├── monitoring/              # Prometheus, Grafana, OTel Collector, Jaeger
-│   ├── nginx/                   # Reverse proxy config
-│   └── redis/                   # Redis Streams config
-├── scripts/                     # Dev utilities
-│   ├── init_qdrant.py           # Seed Qdrant with RSL glossary
-│   ├── export_gesture_classifier.py  # PyTorch → ONNX export
-│   ├── promote_model.py         # Registry promotion with SLO gate
-│   ├── run_benchmarks.sh        # Full benchmark orchestration
-│   ├── deploy.sh                # Rolling production deploy
-│   └── ws_gesture_client_example.py  # WebSocket demo client
-├── docker-compose.yml           # Development stack
-├── docker-compose.override.yml  # Hot-reload overrides
-├── docker-compose.gpu.yml       # GPU device reservations
-├── docker-compose.prod.yml      # Production resource limits
-├── dvc.yaml                     # Model + experiment pipeline stages
-├── params.yaml                  # All hyperparameters tracked by DVC
-├── pyproject.toml               # Root lint/type/test config
-└── Makefile                     # Developer commands
-```
+---
 
-## Development Commands
+## Метрики (результаты экспериментов)
+
+> Числа получены в dry-run режиме на основе архитектурных характеристик моделей
+> (раздел 3.3 дипломной работы). Реальные замеры — `make exp-dry` или `dvc repro`.
+
+### Классификатор жестов (эксп. 00, 01)
+
+| Модель          | Top-1 | Top-5  | P95 CPU | Размер | RAM     |
+|-----------------|-------|--------|---------|--------|---------|
+| **ST-GCN ONNX** | 89.1% | 97.3%  | 42 мс   | 3.5 МБ | 45 МБ  |
+| S3D (Sber)      | 89.1% | 97.1%  | 95 мс   | 87 МБ  | 1850 МБ|
+| ResNet3D-50     | 85.4% | 95.1%  | 140 мс  | 120 МБ | 2400 МБ|
+
+ST-GCN выбран: CPU-first, в 25× меньше RAM при том же Top-1 (скользящее окно 32 кадра, шаг 15).
+
+### Распознавание речи (эксп. 04)
+
+| Модель          | WER    | P95     | Размер  |
+|-----------------|--------|---------|---------|
+| whisper-tiny    | 21.0%  | 98 мс   | 75 МБ   |
+| **whisper-base**| **11.0%** | **210 мс** | **145 МБ** |
+| whisper-small   | 8.0%   | 340 мс  | 488 МБ  |
+
+`base` выбран: WER 11% при задержке 210 мс — баланс качества и скорости.
+
+### Перевод глосс → русский (эксп. 05)
+
+| Модель           | BLEU-4 | ROUGE-L | P95      | Размер |
+|------------------|--------|---------|----------|--------|
+| Qwen2-0.5B       | 0.21   | 0.48    | 195 мс   | 1.1 ГБ|
+| **Qwen2-1.5B**   | **0.38** | **0.63** | **490 мс** | **3.1 ГБ** |
+| Qwen2-7B         | 0.47   | 0.70    | 1850 мс  | 14.5 ГБ|
+
+Qwen2-1.5B выбран: BLEU-4 0.38 (выше SLO 0.35) при P95 490 мс. 7B даёт +24% качества, но в 3.8× медленнее.
+
+### Синтез речи (эксп. 07)
+
+| Система               | UTMOS | RTF    |
+|-----------------------|-------|--------|
+| Sber GigaTTS Joy      | 4.21  | —      |
+| Human reference       | 4.47  | —      |
+| **Silero TTS v4**     | ~3.81 | 0.047  |
+
+Silero выбран: CPU-only, RTF 0.047 (в 21× быстрее реального времени), не требует GPU.
+
+### E2E задержка (эксп. 08)
+
+| Компонент      | P50    | P95    |
+|----------------|--------|--------|
+| CV (скелет + инференс)  | 24 мс  | 42 мс  |
+| ASR (faster-whisper)    | 165 мс | 210 мс |
+| NLP (Qwen2-1.5B)        | 380 мс | 540 мс |
+| TTS (Silero v4)         | 115 мс | 185 мс |
+| Redis xadd              | 0.6 мс | 1.1 мс |
+| **E2E (серверная)**     | **584 мс** | **977 мс** |
+
+С учётом сети на Poco M5 (4G, RTT 65 мс, jitter 15 мс): P95 ≈ **1 057 мс** — в пределах SLO 2 000 мс.
+
+---
+
+## SLO-требования
+
+| Метрика                        | Цель        | Примечание              |
+|--------------------------------|-------------|-------------------------|
+| E2E задержка P95               | ≤ 2 000 мс  | Poco M5 (4G)            |
+| E2E задержка P95               | ≤ 1 100 мс  | Realme X60 (5G)         |
+| Инференс CV P95                | ≤ 50 мс     | CPU, OpenVINO INT8      |
+| ASR P95                        | ≤ 350 мс    | faster-whisper base int8|
+| NLP перевод P95                | ≤ 600 мс    | Qwen2-1.5B CPU          |
+| TTS синтез P95                 | ≤ 185 мс    | Silero v4 CPU           |
+| Top-1 точность жестов          | ≥ 90%       | тестовая часть Slovo    |
+| WER (распознавание речи)       | ≤ 15%       | русская речь            |
+| BLEU-4 (глоссы → русский)      | ≥ 0.35      | набор переводов         |
+
+---
+
+## Команды разработки
 
 ```bash
-make help              # Show all available commands
-make install           # Install dev dependencies + pre-commit hooks
-make dev               # Start all services with hot-reload
-make up                # Start all services (detached)
-make down              # Stop all services
-make build             # Build all Docker images
-make test              # Run full test suite (pytest)
-make lint              # Ruff + Black check
-make typecheck         # mypy --strict
-make check             # lint + format + typecheck combined
-make gpu-up            # Start with GPU support (NVIDIA Container Toolkit)
-make prod-up           # Start with production resource limits
-make deploy            # Rolling production deployment
-make backup            # Backup Redis, Qdrant, MLflow, Grafana
-make mlflow-ui         # Open MLflow experiment tracker
-make migrate-qdrant    # Re-initialise Qdrant collections
-make logs-nlp-service  # Follow NLP service logs
+make help          # все доступные команды
+
+make dev           # запустить с горячей перезагрузкой
+make up            # запустить в фоне
+make down          # остановить
+make build         # собрать все образы
+make build-cv-service  # собрать один сервис
+
+make logs          # логи всех сервисов
+make logs-nlp-service  # логи одного сервиса
+make health        # проверить /health/live у всех сервисов
+
+make test          # pytest
+make lint          # ruff check --fix
+make format        # black
+make check         # lint + format
+
+make models        # скачать модели с Google Drive
+make exp-dry       # прогнать все эксперименты без GPU/моделей
+make mlflow-ui     # открыть MLflow на http://localhost:5000
+
+make prod-up       # запустить с prod-лимитами ресурсов
+make dvc-pull      # скачать артефакты с DagsHub
 ```
 
-## Running Experiments
-
-Each experiment can be run in **dry-run mode** (no services or models required) or against live services.
-
-```bash
-# All 8 experiments, dry-run
-bash experiments/run_all.sh --dry-run
-
-# All 8 experiments against live services
-bash experiments/run_all.sh \
-    --host http://localhost:8000 \
-    --slovo-root /path/to/slovo \
-    --n-samples 100
-
-# Single experiment
-python -m experiments.01_gesture_backbone.run --dry-run
-python -m experiments.08_e2e_latency.run --host http://localhost:8000
-
-# Via DVC pipeline (reproduces all exp stages)
-dvc repro exp_01_gesture_backbone
-dvc repro exp_08_e2e_latency
-```
-
-Results are written to `experiments/results/<exp>/results.json` and logged to MLflow.
-
-### Experiment Overview
-
-| # | Experiment | Decision justified |
-|---|------------|--------------------|
-| 01 | Gesture backbone comparison | STGCN (skeleton) over S3D (video) |
-| 02 | Sliding window grid search | window=30, stride=15 |
-| 03 | ONNX / OpenVINO / INT8 acceleration | OpenVINO: 3.5+ PPS on CPU |
-| 04 | Whisper tiny / base / small | whisper-base (WER ≤ 15%, P95 ≤ 350ms) |
-| 05 | Qwen2-0.5B / 1.5B / 7B | Qwen2-1.5B (BLEU-4 ≥ 0.35, P95 ≤ 600ms) |
-| 06 | RAG ablation (domain vs general vs none) | domain RAG: +27pp medical term recall |
-| 07 | Silero v4 UTMOS vs GigaTTS (Sber 2024) | Silero: UTMOS 3.81, RTF 0.047, CPU-only |
-| 08 | End-to-end latency + mobile projection | E2E P95 ≈ 977ms, Poco M5 passes 2000ms SLO |
-
-## Benchmarks
-
-```bash
-# Full benchmark suite (against running services)
-bash scripts/run_benchmarks.sh \
-    --host http://localhost:8000 \
-    --concurrency 20 \
-    --duration 60
-
-# Locust load test (UI at http://localhost:8089)
-cd benchmarks && locust --host http://localhost:8000
-
-# Just latency profiling
-python -m benchmarks.runners.latency_runner --host http://localhost:8000
-```
-
-## CPU / GPU Switching
-
-```bash
-make up          # CPU (default)
-make gpu-up      # GPU (requires NVIDIA Container Toolkit)
-```
-
-Device auto-detected via `CV_DEVICE`, `ASR_DEVICE`, `NLP_DEVICE`, `TTS_DEVICE` in `.env`.
+---
 
 ## WebSocket API
 
@@ -226,104 +197,100 @@ ws://localhost:8000/api/v1/ws/translate/{mode}
 
 `mode`: `rsl_to_text` | `text_to_rsl`
 
-**Send:**
+**Клиент → сервер:**
 ```json
-{"type": "video_frame", "frame": {"keypoints": [...]}, "domain": "medical"}
-{"type": "audio_chunk", "audio": "<base64 PCM>",        "domain": "banking"}
-{"type": "end_session"}
+{"type": "video_frame",  "frame": "<base64 JPEG>",   "session_id": "<uuid>"}
+{"type": "audio_chunk",  "audio": "<base64 PCM16>",  "session_id": "<uuid>"}
+{"type": "end_session",                               "session_id": "<uuid>"}
 ```
 
-**Receive:**
+**Сервер → клиент:**
 ```json
-{"type": "chunk",       "session_id": "...", "payload": {"text": "...", "is_final": false}}
-{"type": "result",      "session_id": "...", "payload": {"text": "...", "confidence": 0.92}}
-{"type": "session_end", "session_id": "...", "payload": {}}
+{"type": "gloss",   "glosses": [{"gloss": "ПРИВЕТ", "prob": 0.92}]}
+{"type": "chunk",   "text": "частичный текст ASR…"}
+{"type": "result",  "text": "Переведённое предложение"}
+{"type": "audio",   "audio": "<base64 WAV>"}
+{"type": "error",   "message": "…"}
 ```
 
-## REST API
+---
+
+## Эксперименты
+
+Каждый эксперимент обосновывает решение по выбору архитектуры. Все запускаются без GPU.
 
 ```bash
-# Synchronous translation
-POST /api/v1/translate
-{"mode": "rsl_to_text", "gloss_sequence": "ПРИВЕТ КАК ДЕЛА", "domain": "general"}
+make exp-dry      # все 9 экспериментов в dry-run
 
-# Health checks (Docker / K8s probes)
-GET /health/live
-GET /health/ready
+# Или по одному:
+python experiments/01_gesture_backbone/run.py --dry-run
+python experiments/08_e2e_latency/run.py --dry-run
 
-# Prometheus metrics
-GET /metrics
-```
-
-## Observability Stack
-
-| Tool       | URL                     | Purpose               |
-|------------|-------------------------|-----------------------|
-| Grafana    | http://localhost:3001   | Dashboards            |
-| Prometheus | http://localhost:9090   | Metrics scraping      |
-| Jaeger     | http://localhost:16686  | Distributed tracing   |
-| MLflow     | http://localhost:5000   | Experiment tracking   |
-
-## Model Lifecycle (MLOps)
-
-```bash
-# Reproduce full training + eval pipeline
+# Через DVC (воспроизводит все стадии):
 dvc repro
-
-# Train gesture classifier (falls back to SlovoDataset if processed data absent)
-python -m mlops.pipelines.train_gesture --params params.yaml
-python -m mlops.pipelines.train_gesture --slovo-root /data/slovo  # Kaggle/YC path
-
-# Export to ONNX
-python scripts/export_gesture_classifier.py
-
-# Promote model to production (checks SLO gates)
-python scripts/promote_model.py --model gesture_classifier --run-id <run_id>
-
-# Evaluate NLP / ASR
-python -m mlops.pipelines.eval_nlp --modality nlp
-python -m mlops.pipelines.eval_nlp --modality asr
 ```
 
-All hyperparameters live in `params.yaml` and are versioned by DVC.
+| №  | Эксперимент                      | Решение                                        |
+|----|----------------------------------|------------------------------------------------|
+| 00 | Сравнение backbone-архитектур    | ST-GCN vs S3D vs ResNet3D-50                   |
+| 01 | ST-GCN vs скелет vs видео        | ST-GCN: Top-1=89.1%, 3.5 МБ, P95=42 мс        |
+| 02 | Сетка скользящего окна           | window=32, stride=15 (оптимум WER/латентность) |
+| 03 | ONNX → OpenVINO → INT8           | OpenVINO INT8: ускорение 3.5×, размер 1.2 МБ  |
+| 04 | Whisper tiny / base / small      | base: WER=11%, P95=210 мс                      |
+| 05 | Qwen2 0.5B / 1.5B / 7B          | 1.5B: BLEU-4=0.38, P95=490 мс                 |
+| 06 | RAG-абляция (домен / общий / нет)| запланировано; RAG сейчас отключён             |
+| 07 | Silero v4 vs GigaTTS (Sber 2024) | Silero: RTF=0.047, CPU-only                    |
+| 08 | E2E задержка + проекция на устройство | P95=977 мс (сервер) → 1 057 мс (Poco M5)  |
+| 09 | Кросс-валидация (5-fold)         | Стратифицированный сплит, 95% ДИ               |
 
-## Kubernetes Migration
+---
 
-Helm chart scaffolded at `infra/k8s/helm/glossa/`. Each service maps to a Deployment + Service + HPA.
+## Структура проекта
 
-```bash
-# Push images (update REGISTRY in CI first)
-make build && docker compose push
-
-# Deploy
-helm install glossa infra/k8s/helm/glossa/ -f infra/k8s/values.prod.yaml
+```
+glossa/
+├── services/
+│   ├── api_gateway/        # WebSocket + REST оркестратор
+│   ├── cv_service/         # MediaPipe + ST-GCN
+│   ├── asr_service/        # faster-whisper
+│   ├── nlp_service/        # Qwen2-1.5B
+│   └── tts_service/        # Silero TTS
+├── clients/
+│   ├── mobile/             # Flutter (iOS / Android)
+│   └── web/                # Flutter Web
+├── experiments/            # Скрипты обоснования архитектуры
+├── mlops/
+│   └── pipelines/          # DVC: обучение, оценка, бенчмарк
+├── libs/
+│   └── common/             # Общие утилиты (mlops)
+├── infra/monitoring/       # Prometheus + Grafana
+├── scripts/
+│   ├── download_models.py  # Загрузка моделей с Google Drive
+│   └── preprocess_gesture_dataset.py
+├── models/                 # Веса моделей (gitignore, DVC)
+├── data/                   # Датасет (gitignore, DVC)
+├── docker-compose.yml
+├── docker-compose.override.yml   # Горячая перезагрузка для dev
+├── docker-compose.prod.yml       # Prod-лимиты ресурсов
+├── dvc.yaml                      # Стадии ML-пайплайна
+├── params.yaml                   # Все гиперпараметры (DVC)
+└── Makefile
 ```
 
-## Tech Stack
+---
 
-| Layer        | Technology |
-|--------------|------------|
-| Runtime      | Python 3.11, FastAPI, uvicorn[uvloop] |
-| CV           | MediaPipe Holistic, ONNX Runtime, OpenVINO |
-| Gesture      | STGCN (skeleton-based), 75 landmarks × 3 coords |
-| ASR          | faster-whisper base (CTranslate2 backend) |
-| NLP          | Qwen2-1.5B-Instruct, LangGraph, Qdrant + BGE-M3 |
-| TTS          | Silero TTS v4 (CPU, RTF ≈ 0.05) |
-| Messaging    | Redis Streams |
-| Infra        | Docker Compose, Prometheus, Grafana, OTel, Jaeger |
-| MLOps        | MLflow, DVC, ONNX Model Registry |
-| Quality      | Ruff, Black, mypy strict, pre-commit, pytest, Bandit |
+## Технологический стек
 
-## SLO Targets
-
-| Metric                          | Target       | Device              |
-|---------------------------------|--------------|---------------------|
-| End-to-end latency (P95)        | ≤ 2 000 ms  | Poco M5 (4G)        |
-| End-to-end latency (P95)        | ≤ 1 100 ms  | Realme X60 (5G)     |
-| Gesture inference (P95)         | ≤ 50 ms     | CPU                 |
-| ASR latency (P95)               | ≤ 350 ms    | CPU int8            |
-| NLP translation (P95)           | ≤ 600 ms    | GPU / CPU           |
-| TTS synthesis (P95)             | ≤ 185 ms    | CPU                 |
-| Gesture accuracy (Top-1)        | ≥ 90 %      | test split          |
-| ASR WER                         | ≤ 15 %      | Russian speech      |
-| NLP BLEU-4                      | ≥ 0.35      | RSL gloss → Russian |
+| Слой         | Технология                                          |
+|--------------|-----------------------------------------------------|
+| Runtime      | Python 3.11, FastAPI, uvicorn[uvloop]               |
+| CV           | MediaPipe Holistic (75 точек), ONNX Runtime, OpenVINO |
+| Классификатор| ST-GCN, скользящее окно 32 кадра, шаг 15           |
+| ASR          | faster-whisper base (CTranslate2, int8)             |
+| NLP          | Qwen2-1.5B-Instruct, QLoRA (lora_r=64, lora_alpha=128) |
+| TTS          | Silero TTS v4 (RTF ≈ 0.05, CPU)                    |
+| Шина данных  | Redis 7.2 Streams                                   |
+| Клиенты      | Flutter 3 (Material 3)                              |
+| MLOps        | DVC + DagsHub, MLflow + SQLite                      |
+| Мониторинг   | Prometheus, Grafana                                 |
+| Качество кода| Ruff, Black, pytest                                 |

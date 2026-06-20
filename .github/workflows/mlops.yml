@@ -8,7 +8,7 @@ on:
       - "dvc.yaml"
       - "scripts/export_gesture_classifier.py"
       - "scripts/promote_model.py"
-      - "services/gesture_recognition/**"
+      - "services/cv_service/**"
       - "services/nlp_service/**"
   pull_request:
     paths:

@@ -1,3 +1,6 @@
+# Diploma text (local only)
+diploma_text.txt
+
 # Python
 __pycache__/
 *.py[cod]
@@ -63,15 +66,16 @@ Thumbs.db
 .env.*.local
 !.env.example
 
-# Models & data (use DVC)
+# Models & data (tracked by DVC — git only sees *.dvc pointer files)
+# Binary extensions kept as safety net; DVC manages models/.gitignore and data/.gitignore
 *.onnx
 *.pt
 *.pth
-*.bin
 *.gguf
-data/
-models/
-!models/.gitkeep
+*.npz
+*.safetensors
+# data/ and models/ — NOT ignored at root level so DVC can place *.dvc pointer files here.
+# DVC auto-creates data/.gitignore and models/.gitignore to ignore the actual binaries.
 
 # MLflow
 mlruns/
@@ -87,6 +91,8 @@ logs/
 
 # Jupyter
 .ipynb_checkpoints/
+**/notebook_out.ipynb
+experiments/results/
 
 # Redis dump
 dump.rdb

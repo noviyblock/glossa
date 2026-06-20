@@ -39,9 +39,7 @@ jobs:
             types-redis types-requests
 
       - name: Install local packages (stubs only, no extras)
-        run: |
-          pip install -e libs/common --no-deps
-          pip install -e libs/max_sdk --no-deps
+        run: pip install -e libs/common --no-deps
 
       - name: Ruff lint
         run: ruff check services/ libs/ --output-format=github
@@ -65,7 +63,7 @@ jobs:
           for svc_dir in services/*/; do
             svc=$(basename "$svc_dir")
             echo "=== mypy: $svc ==="
-            mypy "$svc_dir/app" --config-file=pyproject.toml --ignore-missing-imports || true
+            mypy "$svc_dir" --config-file=pyproject.toml --ignore-missing-imports || true
           done
 
   test:
@@ -96,7 +94,6 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e libs/common
-          pip install -e libs/max_sdk
           # Install test deps for each service
           for svc_dir in services/*/; do
             if [[ -f "${svc_dir}pyproject.toml" ]]; then
@@ -110,7 +107,6 @@ jobs:
         env:
           REDIS_URL: redis://localhost:6379/0
           ENVIRONMENT: development
-          MAX_BOT_TOKEN: test-token
           NLP_MODEL_PATH: /dev/null
           CV_MODEL_PATH: /dev/null
         run: |
@@ -118,7 +114,6 @@ jobs:
             --cov=libs --cov=services \
             --cov-report=xml \
             --cov-report=term-missing \
-            --ignore=services/gesture_recognition \
             -v
 
       - name: Upload coverage
@@ -146,7 +141,6 @@ jobs:
           - asr_service
           - nlp_service
           - tts_service
-          - max_adapter
 
     steps:
       - uses: actions/checkout@v4

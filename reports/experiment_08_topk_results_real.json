@@ -1,0 +1,13 @@
+{
+  "bleu4_top1": 0.0,
+  "bleu4_topk": 0.0,
+  "bleu4_delta": 0.0,
+  "rouge_l_top1": 0.0,
+  "rouge_l_topk": 0.0,
+  "rouge_l_delta": 0.0,
+  "p95_top1_ms": 387.09963419998985,
+  "p95_topk_ms": 718.2469931498872,
+  "n_eval": 150,
+  "n_real_found": 103,
+  "real_pct": 0.6866666666666666
+}

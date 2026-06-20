@@ -43,7 +43,7 @@ EXPERIMENT_NAME = "02_sliding_window_search"
 RESULTS_DIR = Path("experiments/results/02_sliding_window")
 
 WINDOW_SIZES = [16, 30, 48, 64]
-STRIDES      = [1, 8, 15, 30]
+STRIDES      = [1, 8, 16, 32]
 
 
 # ── Sliding window inference over a sequence ──────────────────────────────────
@@ -192,7 +192,9 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
         import onnxruntime as ort  # type: ignore[import]
         from experiments.shared.slovo_dataset import SlovoDataset
 
-        dataset = SlovoDataset(args.slovo_root, split="all")
+        label_mapping = getattr(args, "label_mapping", "") or None
+        dataset = SlovoDataset(args.slovo_root, split="all",
+                               label_mapping_path=label_mapping)
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 4
         session = ort.InferenceSession(args.onnx_model, sess_options=opts,
@@ -204,8 +206,16 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
 
     with mlflow_run(
         EXPERIMENT_NAME,
-        run_name=f"window_search_n{args.n_samples}",
-        tags={"experiment": "02"},
+        run_name=f"window_search_n{args.n_samples}_{time.strftime('%Y%m%d_%H%M')}",
+        tags={"experiment": "02",
+              "mode": "dry_run" if args.dry_run else "full",
+              "grid": f"w={WINDOW_SIZES} s={STRIDES}"},
+        nested=True,
+        description=(
+            "Поиск оптимального скользящего окна детектора жестов РЖЯ. "
+            f"Сетка: window∈{WINDOW_SIZES}, stride∈{STRIDES}. "
+            "Выбор: w=64, s=32 — баланс точности и PPS."
+        ),
     ) as run:
         log_params({"n_samples": args.n_samples, "threshold": args.threshold,
                     "window_sizes": str(WINDOW_SIZES), "strides": str(STRIDES)})
@@ -246,7 +256,7 @@ def _print_grid(results: dict[str, Any]) -> None:
         m = results[key]
         if not isinstance(m, dict):
             continue
-        marker = " ← our choice" if key == "w30_s15" else ""
+        marker = " ← our choice" if key == "w64_s32" else ""
         print(f"{key:<12} {m.get('top1_accuracy', 0):>6.3f} "
               f"{m.get('p95_latency_ms', 0):>8.1f} "
               f"{m.get('effective_pps', 0):>7.2f} "
@@ -257,11 +267,13 @@ def _print_grid(results: dict[str, Any]) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--slovo-root",  default="data/slovo")
-    p.add_argument("--onnx-model",  default="models/gesture_classifier.onnx")
-    p.add_argument("--n-samples",   type=int, default=100)
-    p.add_argument("--threshold",   type=float, default=0.6)
-    p.add_argument("--dry-run",     action="store_true")
+    p.add_argument("--slovo-root",    default="data/slovo")
+    p.add_argument("--onnx-model",    default="models/gesture_classifier.onnx")
+    p.add_argument("--n-samples",     type=int, default=100)
+    p.add_argument("--threshold",     type=float, default=0.6)
+    p.add_argument("--label-mapping", default="",
+                   help="Path to label_mapping.json from exp 00 EDA for consistent class IDs")
+    p.add_argument("--dry-run",       action="store_true")
     run_experiment(p.parse_args())
 
 

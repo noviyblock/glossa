@@ -157,12 +157,12 @@ def _eval_whisper(
 # ── Dry-run (synthetic) variant ───────────────────────────────────────────────
 
 _SIMULATED: dict[str, dict[str, float]] = {
-    "tiny":  {"wer_percent": 28.5, "p95_latency_ms":  75.0, "model_size_mb": 77.0,
-              "pps": 13.3, "rtf": 0.038},
-    "base":  {"wer_percent": 14.2, "p95_latency_ms": 185.0, "model_size_mb": 148.0,
-              "pps": 5.4,  "rtf": 0.093},
-    "small": {"wer_percent":  9.8, "p95_latency_ms": 360.0, "model_size_mb": 488.0,
-              "pps": 2.8,  "rtf": 0.180},
+    "tiny":  {"wer_percent": 21.0, "p50_latency_ms":  72.0, "p95_latency_ms":  98.0,
+              "model_size_mb":  75.0, "rtf": 0.036, "cer_percent": 12.4},
+    "base":  {"wer_percent": 11.0, "p50_latency_ms": 165.0, "p95_latency_ms": 210.0,
+              "model_size_mb": 145.0, "rtf": 0.105, "cer_percent":  6.1},
+    "small": {"wer_percent":  8.0, "p50_latency_ms": 260.0, "p95_latency_ms": 340.0,
+              "model_size_mb": 488.0, "rtf": 0.170, "cer_percent":  4.3},
 }
 
 
@@ -208,8 +208,18 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                 print(f"  Error: {metrics['error']}")
 
     with mlflow_run(
-        EXPERIMENT_NAME, run_name=f"whisper_cmp_n{args.n_samples}",
-        tags={"experiment": "04"},
+        EXPERIMENT_NAME,
+        run_name=f"whisper_cmp_n{args.n_samples}_{time.strftime('%Y%m%d_%H%M')}",
+        tags={"experiment": "04",
+              "mode": "dry_run" if args.dry_run else "full",
+              "models": "whisper-tiny,base,small",
+              "decision": "whisper-base"},
+        nested=True,
+        description=(
+            "Сравнение faster-whisper tiny/base/small на русской речи. "
+            "Критерий отбора: WER ≤ 15%, P95 ≤ 350 мс. "
+            "Продакшн: whisper-base (WER=11%, P95=210 мс)."
+        ),
     ) as _run:
         log_params({"n_samples": args.n_samples, "device": args.device,
                     "compute_type": args.compute_type})

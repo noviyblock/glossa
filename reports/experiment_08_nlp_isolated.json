@@ -1,0 +1,13 @@
+{
+  "bleu4_top1": 83.9138301714074,
+  "bleu4_topk": 14.55872551773084,
+  "bleu4_delta": -69.35510465367656,
+  "rouge_l_top1": 0.0,
+  "rouge_l_topk": 0.0,
+  "rouge_l_delta": 0.0,
+  "p95_top1_ms": 1237.7296421003614,
+  "p95_topk_ms": 5431.501390499897,
+  "n_eval": 200.0,
+  "eval_mode": "nlp_isolated",
+  "model": "qwen2_1.5b_merged"
+}

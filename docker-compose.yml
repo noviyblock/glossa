@@ -5,105 +5,84 @@ x-logging: &default-logging
   options:
     max-size: "50m"
     max-file: "5"
-    labels: "service"
     tag: "{{.Name}}"
 
-x-healthcheck-defaults: &healthcheck-defaults
+x-healthcheck-defaults: &hc
   interval: 15s
   timeout: 5s
   retries: 3
   start_period: 30s
 
-x-service-defaults: &service-defaults
+x-service-defaults: &svc
   restart: unless-stopped
   logging: *default-logging
   env_file: .env
   networks:
-    - glossa-internal
+    - glossa-net
+
+# ── Model volumes shared between services ───────────────────────────────────
+x-model-volumes: &model-vols
+  - ./models:/models:ro
+  - ./data:/data:ro
 
 services:
   # ── Infrastructure ──────────────────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
-    <<: *service-defaults
-    command: redis-server /usr/local/etc/redis/redis.conf
+    <<: *svc
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
     volumes:
-      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
     healthcheck:
-      <<: *healthcheck-defaults
+      <<: *hc
       test: ["CMD", "redis-cli", "ping"]
     ports:
       - "6379:6379"
 
-  qdrant:
-    image: qdrant/qdrant:v1.9.4
-    <<: *service-defaults
+  # ── MLflow — SQLite backend, no external DB required ────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.1
+    <<: *svc
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:///mlartifacts/mlflow.db
+      --default-artifact-root /mlartifacts
     volumes:
-      - qdrant-data:/qdrant/storage
+      - mlflow-data:/mlartifacts
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      <<: *hc
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      start_period: 10s
     ports:
-      - "6333:6333"
+      - "5000:5000"
 
-  # ── Logging ─────────────────────────────────────────────────────────────────
-  loki:
-    image: grafana/loki:3.0.0
-    <<: *service-defaults
-    command: -config.file=/etc/loki/loki-config.yml
-    volumes:
-      - ./infra/monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
-      - loki-data:/loki
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
-    ports:
-      - "3100:3100"
-
-  promtail:
-    image: grafana/promtail:3.0.0
-    <<: *service-defaults
-    command: -config.file=/etc/promtail/promtail-config.yml
-    volumes:
-      - ./infra/monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    depends_on:
-      - loki
-
-  # ── Observability ───────────────────────────────────────────────────────────
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.100.0
-    <<: *service-defaults
-    volumes:
-      - ./infra/monitoring/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
-    ports:
-      - "4317:4317"
-      - "4318:4318"
-
+  # ── Observability ────────────────────────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.52.0
-    <<: *service-defaults
+    <<: *svc
     volumes:
       - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./infra/monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.time=15d"
       - "--web.enable-lifecycle"
-      - "--web.enable-admin-api"
     ports:
       - "9090:9090"
 
   grafana:
     image: grafana/grafana:10.4.3
-    <<: *service-defaults
+    <<: *svc
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
       - GF_UNIFIED_ALERTING_ENABLED=true
     volumes:
       - ./infra/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
@@ -111,58 +90,133 @@ services:
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
-      - loki
     ports:
       - "3001:3000"
 
-  nginx:
-    image: nginx:1.27-alpine
-    <<: *service-defaults
-    volumes:
-      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - api-gateway
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/nginx-health"]
-    ports:
-      - "80:80"
-
-  jaeger:
-    image: jaegertracing/all-in-one:1.57
-    <<: *service-defaults
-    environment:
-      - SPAN_STORAGE_TYPE=badger
-      - BADGER_EPHEMERAL=false
-      - BADGER_DIRECTORY_VALUE=/badger/data
-      - BADGER_DIRECTORY_KEY=/badger/key
-    volumes:
-      - jaeger-data:/badger
-    ports:
-      - "16686:16686"
-
-  mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.13.1
-    <<: *service-defaults
-    command: >
-      mlflow server
-      --host 0.0.0.0
-      --port 5000
-      --default-artifact-root /mlartifacts
-    volumes:
-      - mlflow-data:/mlartifacts
-    ports:
-      - "5000:5000"
-
   # ── Application Services ────────────────────────────────────────────────────
+  cv-service:
+    build:
+      context: services/cv_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *svc
+    environment:
+      # Inference backends
+      ONNX_MOBILE_PATH: /models/gesture_classifier_mobile.onnx
+      OV_XML_PATH: /models/stgcn_topk_int8/stgcn_topk_int8.xml
+      # Normalisation
+      NORM_STATS_PATH: /models/norm_stats.npz
+      CLASS_MAP_PATH: /data/idx_to_class.json
+      # Sliding window
+      WINDOW_SIZE: "32"
+      WINDOW_STRIDE: "15"
+      CONF_THRESHOLD: "0.7"
+      # Runtime
+      CV_SERVICE_PORT: "8001"
+      REDIS_URL: redis://redis:6379
+    volumes: *model-vols
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health/live"]
+      start_period: 60s
+    ports:
+      - "8001:8001"
+
+  asr-service:
+    build:
+      context: services/asr_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *svc
+    environment:
+      ASR_SERVICE_PORT: "8002"
+      WHISPER_MODEL: base
+      DEVICE: cpu
+      COMPUTE_TYPE: int8
+      LANGUAGE: ru
+      BEAM_SIZE: "5"
+      VAD_FILTER: "true"
+      # cache dir inside the models volume
+      WHISPER_CACHE_DIR: /models/whisper_cache
+    volumes:
+      - ./models:/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health/live"]
+      start_period: 45s
+    ports:
+      - "8002:8002"
+    shm_size: "512m"
+
+  nlp-service:
+    build:
+      context: services/nlp_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *svc
+    environment:
+      NLP_SERVICE_PORT: "8003"
+      MODEL_PATH: /models/qwen2_merged_qwen2_1.5b
+      CACHE_SIZE: "500"
+      MAX_NEW_TOKENS: "128"
+    volumes: *model-vols
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health/live"]
+      start_period: 120s
+    ports:
+      - "8003:8003"
+    shm_size: "2g"
+
+  tts-service:
+    build:
+      context: services/tts_service
+      dockerfile: Dockerfile
+      target: production
+    <<: *svc
+    environment:
+      TTS_SERVICE_PORT: "8004"
+      SILERO_REPO: snakers4/silero-models
+      DEFAULT_SPEAKER: xenia
+      SAMPLE_RATE: "24000"
+      CACHE_SIZE: "200"
+      TORCH_HOME: /models/torch_cache
+    volumes:
+      - ./models:/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health/live"]
+      start_period: 60s
+    ports:
+      - "8004:8004"
+
   api-gateway:
     build:
       context: services/api_gateway
       dockerfile: Dockerfile
       target: production
-    <<: *service-defaults
+    <<: *svc
     environment:
-      - GATEWAY_PORT=8000
+      GATEWAY_PORT: "8000"
+      REDIS_URL: redis://redis:6379
+      CV_SERVICE_URL: http://cv-service:8001
+      ASR_SERVICE_URL: http://asr-service:8002
+      NLP_SERVICE_URL: http://nlp-service:8003
+      TTS_SERVICE_URL: http://tts-service:8004
+      SESSION_TTL: "300"
+      HTTP_TIMEOUT: "30"
     depends_on:
       redis:
         condition: service_healthy
@@ -175,133 +229,17 @@ services:
       tts-service:
         condition: service_healthy
     healthcheck:
-      <<: *healthcheck-defaults
+      <<: *hc
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
     ports:
       - "8000:8000"
-    labels:
-      - "service=api-gateway"
-
-  cv-service:
-    build:
-      context: services/cv_service
-      dockerfile: Dockerfile
-      target: production
-    <<: *service-defaults
-    environment:
-      - CV_SERVICE_PORT=8001
-    volumes:
-      - model-store:/models:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health/live"]
-    ports:
-      - "8001:8001"
-    labels:
-      - "service=cv-service"
-
-  asr-service:
-    build:
-      context: services/asr_service
-      dockerfile: Dockerfile
-      target: production
-    <<: *service-defaults
-    environment:
-      - ASR_SERVICE_PORT=8002
-    volumes:
-      - model-store:/models:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health/live"]
-    ports:
-      - "8002:8002"
-    labels:
-      - "service=asr-service"
-    shm_size: "1g"
-
-  nlp-service:
-    build:
-      context: services/nlp_service
-      dockerfile: Dockerfile
-      target: production
-    <<: *service-defaults
-    environment:
-      - NLP_SERVICE_PORT=8003
-    volumes:
-      - model-store:/models:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:8003/health/live"]
-    ports:
-      - "8003:8003"
-    labels:
-      - "service=nlp-service"
-    shm_size: "2g"
-
-  tts-service:
-    build:
-      context: services/tts_service
-      dockerfile: Dockerfile
-      target: production
-    <<: *service-defaults
-    environment:
-      - TTS_SERVICE_PORT=8004
-    volumes:
-      - model-store:/models:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:8004/health/live"]
-    ports:
-      - "8004:8004"
-    labels:
-      - "service=tts-service"
-
-  max-adapter:
-    build:
-      context: services/max_adapter
-      dockerfile: Dockerfile
-      target: production
-    <<: *service-defaults
-    environment:
-      - MAX_ADAPTER_PORT=8005
-    depends_on:
-      redis:
-        condition: service_healthy
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:8005/health/live"]
-    ports:
-      - "8005:8005"
-    labels:
-      - "service=max-adapter"
 
 networks:
-  glossa-internal:
+  glossa-net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
 
 volumes:
   redis-data:
-  qdrant-data:
+  mlflow-data:
   prometheus-data:
   grafana-data:
-  jaeger-data:
-  mlflow-data:
-  loki-data:
-  model-store:

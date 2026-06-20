@@ -9,114 +9,118 @@ data:
   train_split: 0.80
   val_split:   0.10
   test_split:  0.10
-  slovo_root:      data/slovo           # override with --slovo-root or $SLOVO_ROOT
-  gesture_dataset: data/gestures
-  nlp_dataset:     data/translations
-  asr_dataset:     data/audio
+  slovo_root:         data/raw/slovo
+  label_mapping_path: data/label_mapping.json
+  gesture_dataset:    data/gestures
+  nlp_dataset:        data/translations
+  asr_dataset:        data/audio
 
 # ── Gesture recognition ───────────────────────────────────────────────────────
 gesture:
-  model_architecture: stgcn   # stgcn | poseformer | mlstm
-  num_classes: 200
-  sequence_length: 64   # EDA: median=48, Q3=58 → 64 covers ~80% without padding
-  stride: 32
+  model_architecture: stgcn
+  num_classes:    1000
+  num_joints:     75
+  window_size:    32       # sliding window for inference (frames)
+  sequence_length: 64      # training sequence length (EDA: median=48, Q3=58)
+  stride:         15       # sliding window stride
+  confidence_threshold: 0.7
   # Training
-  batch_size: 32
-  learning_rate: 0.001
-  epochs: 100
+  batch_size:     32
+  lr:             0.001
+  learning_rate:  0.001    # alias kept for backward compat
+  epochs:         200
   early_stopping_patience: 10
-  weight_decay: 0.0001
-  scheduler: cosine            # cosine | step | plateau
+  weight_decay:   0.0001
+  scheduler:      cosine
   # Data augmentation
   augmentation:
-    flip_prob: 0.5
+    flip_prob:   0.5
     scale_range: [0.8, 1.2]
-    noise_std: 0.01
+    noise_std:   0.01
   # ONNX export
   export:
     opset_version: 17
-    simplify: true
+    simplify:      true
     quantize_int8: false
 
 # ── NLP translation ───────────────────────────────────────────────────────────
 nlp:
-  base_model: Qwen/Qwen2-1.5B-Instruct
-  peft_method: lora            # lora | qlora | none
-  lora_r: 16
-  lora_alpha: 32
-  lora_dropout: 0.05
-  # Training
-  batch_size: 4
-  learning_rate: 2.0e-4
-  epochs: 3
+  base_model:    "Qwen/Qwen2-1.5B-Instruct"
+  peft_method:   lora
+  lora_r:        64
+  lora_alpha:    128
+  lora_dropout:  0.05
   max_seq_length: 512
-  warmup_ratio: 0.03
+  total_pairs:   10000
+  # Training
+  batch_size:    4
+  learning_rate: 2.0e-4
+  epochs:        3
+  warmup_ratio:  0.03
   gradient_accumulation_steps: 4
-  load_in_4bit: true
-  # Eval
+  load_in_4bit:  true
+  # Inference
   max_new_tokens: 128
-  temperature: 0.1
+  temperature:   0.1
 
 # ── ASR (Whisper) ─────────────────────────────────────────────────────────────
 asr:
-  model_size: base             # tiny | base | small | medium | large-v3
-  compute_type: int8           # int8 | float16 | float32
-  beam_size: 5
-  language: ru
-  vad_filter: true
+  model_size:   base
+  compute_type: int8
+  beam_size:    5
+  language:     ru
+  vad_filter:   true
 
 # ── Benchmarking ──────────────────────────────────────────────────────────────
 benchmark:
-  n_samples: 100
-  warmup_runs: 10
-  batch_sizes: [1, 4, 8]
-  backends: [onnx, onnx_int8]
-  devices: [CPU]
+  n_samples:    100
+  warmup_runs:  10
+  batch_sizes:  [1, 4, 8]
+  backends:     [onnx, onnx_int8]
+  devices:      [CPU]
 
 # ── Architecture-justification experiments ────────────────────────────────────
 experiments:
   cross_val:
-    k_folds: 5
-    epochs: 30
+    k_folds:     5
+    epochs:      30
     train_fracs: [0.05, 0.10, 0.25, 0.50, 0.75, 1.0]
   gesture:
     n_samples: 100
-    seq_len: 64
+    seq_len:   32
   sliding_window:
-    window_sizes: [16, 30, 48, 64]
-    strides:      [1, 8, 15, 30]
+    window_sizes: [16, 24, 32]
+    strides:      [8, 15, 20]
   acceleration:
-    n_samples: 200
-    calibration_samples: 50
+    n_samples:             200
+    calibration_samples:    50
   asr:
-    whisper_sizes: [tiny, base, small]
-    n_samples: 50
+    whisper_sizes: [tiny, base]
+    n_samples:     50
   nlp:
     llm_models:
-      - Qwen/Qwen2-0.5B-Instruct
       - Qwen/Qwen2-1.5B-Instruct
-      - Qwen/Qwen2-7B-Instruct
-    n_samples: 50
+    n_samples:      50
     max_new_tokens: 128
   rag:
     n_samples: 40
   tts:
-    n_samples: 20
-    speaker: aidar
+    n_samples:   20
+    speakers:    [xenia, eugene, aidar]
     sample_rate: 24000
   e2e:
     n_samples: 50
-    slo_ms: 2000
+    slo_ms:    2000
 
 # ── Promotion thresholds ──────────────────────────────────────────────────────
 promotion:
   gesture:
-    min_accuracy: 0.90
-    min_f1_weighted: 0.88
+    min_accuracy:       0.90
+    min_f1_weighted:    0.88
     max_latency_p95_ms: 50.0
   nlp:
-    min_bleu_4: 0.35
-    min_rouge_l: 0.40
+    min_bleu_4:         0.35
+    min_rouge_l:        0.40
     max_latency_p95_ms: 500.0
   asr:
     max_wer: 0.15

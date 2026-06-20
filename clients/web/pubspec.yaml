@@ -1,0 +1,23 @@
+name: glossa_web
+description: Glossa RSL Translation — web client
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  web_socket_channel: ^2.4.0
+  http: ^1.2.1
+  uuid: ^4.4.0
+  web: ^1.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

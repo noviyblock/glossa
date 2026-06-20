@@ -54,18 +54,11 @@ scrape_configs:
     labels:
       service: tts-service
 
-  - job_name: glossa-max-adapter
-    static_configs:
-      - targets: ["max-adapter:8005"]
-    metrics_path: /metrics
-    labels:
-      service: max-adapter
-
   - job_name: redis
     static_configs:
       - targets: ["redis:6379"]
 
-  - job_name: otel-collector
+  - job_name: mlflow
     static_configs:
-      - targets: ["otel-collector:8889"]
+      - targets: ["mlflow:5000"]
     metrics_path: /metrics
