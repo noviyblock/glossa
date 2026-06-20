@@ -23,4 +23,4 @@ openvino = ["openvino>=2024.1"]
 gpu = ["onnxruntime-gpu>=1.18"]
 
 [tool.hatch.build.targets.wheel]
-packages = []
+bypass-selection = true
