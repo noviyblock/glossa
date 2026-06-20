@@ -1,0 +1,23 @@
+{
+  "llm_only": {
+    "bleu_4": 0.32,
+    "rouge_l": 0.58,
+    "domain_term_recall_medical": 0.61,
+    "domain_term_recall_banking": 0.64,
+    "p95_latency_ms": 480.0
+  },
+  "llm_rag_general": {
+    "bleu_4": 0.4,
+    "rouge_l": 0.65,
+    "domain_term_recall_medical": 0.74,
+    "domain_term_recall_banking": 0.72,
+    "p95_latency_ms": 510.0
+  },
+  "llm_rag_domain": {
+    "bleu_4": 0.44,
+    "rouge_l": 0.69,
+    "domain_term_recall_medical": 0.88,
+    "domain_term_recall_banking": 0.9,
+    "p95_latency_ms": 525.0
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "tiny": {
+    "wer_percent": 21.0,
+    "p50_latency_ms": 72.0,
+    "p95_latency_ms": 98.0,
+    "model_size_mb": 75.0,
+    "rtf": 0.036,
+    "cer_percent": 12.4
+  },
+  "base": {
+    "wer_percent": 11.0,
+    "p50_latency_ms": 165.0,
+    "p95_latency_ms": 210.0,
+    "model_size_mb": 145.0,
+    "rtf": 0.105,
+    "cer_percent": 6.1
+  },
+  "small": {
+    "wer_percent": 8.0,
+    "p50_latency_ms": 260.0,
+    "p95_latency_ms": 340.0,
+    "model_size_mb": 488.0,
+    "rtf": 0.17,
+    "cer_percent": 4.3
+  }
+}

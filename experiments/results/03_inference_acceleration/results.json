@@ -1,0 +1,34 @@
+{
+  "pytorch_f32": {
+    "pps": 0.5,
+    "p50_ms": 2000.0,
+    "p95_ms": 2200.0,
+    "p99_ms": 2450.0,
+    "model_size_mb": 45.0,
+    "speedup_vs_pytorch": 1.0
+  },
+  "onnx_f32": {
+    "pps": 8.1,
+    "p50_ms": 150.0,
+    "p95_ms": 175.0,
+    "p99_ms": 210.0,
+    "model_size_mb": 12.0,
+    "speedup_vs_pytorch": 16.2
+  },
+  "onnx_openvino": {
+    "pps": 23.8,
+    "p50_ms": 38.0,
+    "p95_ms": 42.0,
+    "p99_ms": 50.0,
+    "model_size_mb": 12.0,
+    "speedup_vs_pytorch": 47.6
+  },
+  "onnx_int8": {
+    "pps": 28.9,
+    "p50_ms": 30.0,
+    "p95_ms": 35.0,
+    "p99_ms": 42.0,
+    "model_size_mb": 3.2,
+    "speedup_vs_pytorch": 57.8
+  }
+}

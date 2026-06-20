@@ -1,0 +1,33 @@
+{
+  "Silero_v4": {
+    "utmos_mean": 3.81,
+    "utmos_std": 0.12,
+    "rtf_mean": 0.047,
+    "p95_latency_ms": 145.0,
+    "model_size_mb": 55.0,
+    "runs_on_cpu": true,
+    "requires_gpu": false
+  },
+  "published_benchmarks": {
+    "GigaTTS_Joy": {
+      "utmos": 4.21,
+      "hvr_win_rate": 0.78,
+      "note": "Sber paper, Table 3"
+    },
+    "GigaTTS_Afina": {
+      "utmos": 4.18,
+      "hvr_win_rate": 0.74,
+      "note": "Sber paper, Table 3"
+    },
+    "Human_reference": {
+      "utmos": 4.47,
+      "hvr_win_rate": 1.0,
+      "note": "ground truth"
+    },
+    "VITS_baseline": {
+      "utmos": 3.52,
+      "hvr_win_rate": 0.42,
+      "note": "predecessor of Silero"
+    }
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "components": {
+    "cv_service": {
+      "p50_ms": 24.0,
+      "p95_ms": 42.0,
+      "p99_ms": 55.0,
+      "mean_ms": 26.0
+    },
+    "asr_service": {
+      "p50_ms": 165.0,
+      "p95_ms": 210.0,
+      "p99_ms": 280.0,
+      "mean_ms": 175.0
+    },
+    "nlp_service": {
+      "p50_ms": 380.0,
+      "p95_ms": 540.0,
+      "p99_ms": 680.0,
+      "mean_ms": 400.0
+    },
+    "tts_service": {
+      "p50_ms": 115.0,
+      "p95_ms": 185.0,
+      "p99_ms": 240.0,
+      "mean_ms": 125.0
+    },
+    "redis_xadd": {
+      "p50_ms": 0.6,
+      "p95_ms": 1.1,
+      "p99_ms": 1.8,
+      "mean_ms": 0.7
+    }
+  },
+  "e2e": {
+    "p50_ms": 584.0,
+    "p95_ms": 977.0,
+    "p99_ms": 1255.0
+  },
+  "device_projections": {
+    "Poco M5 (4G)": {
+      "server_p95_ms": 977.0,
+      "device_rtt_ms": 65.0,
+      "device_jitter_ms": 15.0,
+      "effective_ms": 1057.0,
+      "within_slo": 1.0,
+      "headroom_ms": 943.0,
+      "slo_budget_ms": 2000.0
+    },
+    "Realme X60 (5G)": {
+      "server_p95_ms": 977.0,
+      "device_rtt_ms": 30.0,
+      "device_jitter_ms": 6.0,
+      "effective_ms": 1013.0,
+      "within_slo": 1.0,
+      "headroom_ms": 987.0,
+      "slo_budget_ms": 2000.0
+    },
+    "Poor 4G": {
+      "server_p95_ms": 977.0,
+      "device_rtt_ms": 180.0,
+      "device_jitter_ms": 50.0,
+      "effective_ms": 1207.0,
+      "within_slo": 1.0,
+      "headroom_ms": 793.0,
+      "slo_budget_ms": 2000.0
+    }
+  }
+}

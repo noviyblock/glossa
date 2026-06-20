@@ -92,7 +92,6 @@ logs/
 # Jupyter
 .ipynb_checkpoints/
 **/notebook_out.ipynb
-experiments/results/
 
 # Redis dump
 dump.rdb

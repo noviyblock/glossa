@@ -1,0 +1,128 @@
+{
+  "w16_s1": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 1.293604001402855,
+    "p95_latency_ms": 2.208899997640401,
+    "effective_pps": 1.0,
+    "window_size": 16.0,
+    "stride": 1.0,
+    "overlap_ratio": 0.9375
+  },
+  "w16_s8": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.17232100042747334,
+    "p95_latency_ms": 0.3491999814286828,
+    "effective_pps": 1.0,
+    "window_size": 16.0,
+    "stride": 8.0,
+    "overlap_ratio": 0.5
+  },
+  "w16_s16": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.09210099873598665,
+    "p95_latency_ms": 0.19989997963421047,
+    "effective_pps": 1.0,
+    "window_size": 16.0,
+    "stride": 16.0,
+    "overlap_ratio": 0.0
+  },
+  "w30_s1": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.961743000370916,
+    "p95_latency_ms": 1.581299991812557,
+    "effective_pps": 1.0,
+    "window_size": 30.0,
+    "stride": 1.0,
+    "overlap_ratio": 0.9666666666666667
+  },
+  "w30_s8": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.13163800089387223,
+    "p95_latency_ms": 0.29760002507828176,
+    "effective_pps": 1.0,
+    "window_size": 30.0,
+    "stride": 8.0,
+    "overlap_ratio": 0.7333333333333333
+  },
+  "w30_s16": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.06385200074873865,
+    "p95_latency_ms": 0.1286999904550612,
+    "effective_pps": 1.0,
+    "window_size": 30.0,
+    "stride": 16.0,
+    "overlap_ratio": 0.4666666666666667
+  },
+  "w48_s1": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 1.4089510001940653,
+    "p95_latency_ms": 2.0207999914418906,
+    "effective_pps": 1.0,
+    "window_size": 48.0,
+    "stride": 1.0,
+    "overlap_ratio": 0.9791666666666666
+  },
+  "w48_s8": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.2150049968622625,
+    "p95_latency_ms": 0.35930000012740493,
+    "effective_pps": 1.0,
+    "window_size": 48.0,
+    "stride": 8.0,
+    "overlap_ratio": 0.8333333333333334
+  },
+  "w48_s16": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.12744100124109536,
+    "p95_latency_ms": 0.2182999742217362,
+    "effective_pps": 1.0,
+    "window_size": 48.0,
+    "stride": 16.0,
+    "overlap_ratio": 0.6666666666666666
+  },
+  "w48_s32": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.06935599958524108,
+    "p95_latency_ms": 0.12260000221431255,
+    "effective_pps": 1.0,
+    "window_size": 48.0,
+    "stride": 32.0,
+    "overlap_ratio": 0.3333333333333333
+  },
+  "w64_s1": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 1.9141190013033338,
+    "p95_latency_ms": 2.764299977570772,
+    "effective_pps": 1.0,
+    "window_size": 64.0,
+    "stride": 1.0,
+    "overlap_ratio": 0.984375
+  },
+  "w64_s8": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.28903899976285174,
+    "p95_latency_ms": 0.4831000114791095,
+    "effective_pps": 1.0,
+    "window_size": 64.0,
+    "stride": 8.0,
+    "overlap_ratio": 0.875
+  },
+  "w64_s16": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.16466400149511173,
+    "p95_latency_ms": 0.2720000047702342,
+    "effective_pps": 1.0,
+    "window_size": 64.0,
+    "stride": 16.0,
+    "overlap_ratio": 0.75
+  },
+  "w64_s32": {
+    "top1_accuracy": 0.0,
+    "mean_latency_ms": 0.10638899839250371,
+    "p95_latency_ms": 0.2576999831944704,
+    "effective_pps": 1.0,
+    "window_size": 64.0,
+    "stride": 32.0,
+    "overlap_ratio": 0.5
+  }
+}

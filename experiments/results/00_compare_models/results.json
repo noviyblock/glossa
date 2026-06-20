@@ -1,0 +1,30 @@
+{
+  "ST-GCN_ONNX": {
+    "top1_accuracy": 0.891,
+    "top5_accuracy": 0.973,
+    "inference_pps_cpu": 23.8,
+    "inference_latency_p50": 36.0,
+    "inference_latency_p95": 42.0,
+    "model_size_mb": 3.5,
+    "peak_ram_mb": 45.0
+  },
+  "S3D_Sber": {
+    "top1_accuracy": 0.891,
+    "top5_accuracy": 0.971,
+    "inference_pps_cpu": 10.5,
+    "inference_latency_p50": 82.0,
+    "inference_latency_p95": 95.0,
+    "model_size_mb": 87.0,
+    "peak_ram_mb": 1850.0
+  },
+  "ResNet3D-50": {
+    "top1_accuracy": 0.854,
+    "top5_accuracy": 0.951,
+    "inference_pps_cpu": 7.1,
+    "inference_latency_p50": 125.0,
+    "inference_latency_p95": 140.0,
+    "model_size_mb": 120.0,
+    "peak_ram_mb": 2400.0
+  },
+  "mode": "dry_run"
+}
