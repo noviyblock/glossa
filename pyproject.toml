@@ -19,7 +19,7 @@ select = [
 ignore = ["E501", "B008", "RUF012"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["glossa_common", "glossa_max"]
+known-first-party = ["glossa_common"]
 combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]
