@@ -1,0 +1,5 @@
+outs:
+- md5: 610b584d892b8fce8a39d12024256d82
+  size: 2279432
+  hash: md5
+  path: annotations.csv
