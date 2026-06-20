@@ -152,14 +152,14 @@ def _eval_config(
 # ── Synthetic dataset ─────────────────────────────────────────────────────────
 
 class _SyntheticDataset:
-    def __init__(self, n: int = 100, n_classes: int = 100):
+    def __init__(self, n_samples: int = 100, n_classes: int = 100):
         self.num_classes = n_classes
-        self._n = n
+        self._n = n_samples
         class _S:
             def __init__(self, label: int):
                 self.label = label
                 self.split = "test"
-        self._samples = [_S(i % n_classes) for i in range(n)]
+        self._samples = [_S(i % n_classes) for i in range(n_samples)]
 
     def by_split(self, _: str) -> list[Any]:
         return self._samples
