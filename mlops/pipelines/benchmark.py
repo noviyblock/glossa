@@ -8,8 +8,6 @@ Usage:
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 import argparse
 import json
 import time
@@ -148,7 +146,7 @@ def run_gesture_benchmarks(
                 elif backend == "openvino":
                     result = _bench_openvino(model_path, input_fn, batch_size, cfg.benchmark_n_samples, cfg.benchmark_warmup_runs)
                     if result is None:
-                        print(f"  OpenVINO not available, skipping")
+                        print("  OpenVINO not available, skipping")
                         continue
                     latency, memory = result
                 else:
@@ -255,6 +253,7 @@ def run(
 def _emit_prometheus(results: dict[str, list[dict[str, Any]]]) -> None:
     try:
         from glossa_common.telemetry import BENCHMARK_LATENCY_P95, BENCHMARK_MEMORY_MB  # type: ignore[import]
+
         for model_key, entries in results.items():
             for e in entries:
                 backend = e.get("backend", "unknown")

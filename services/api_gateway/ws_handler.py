@@ -6,9 +6,10 @@ can push results to the right client at any time.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import WebSocket
+if TYPE_CHECKING:
+    from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 

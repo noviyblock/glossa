@@ -20,18 +20,20 @@ from __future__ import annotations
 import json
 import logging
 import time
+from typing import TYPE_CHECKING
 
-import httpx
 import redis.asyncio as aioredis
 
 from config import (
     ASR_SERVICE_URL,
     CV_SERVICE_URL,
-    HTTP_TIMEOUT,
     NLP_SERVICE_URL,
     SESSION_TTL,
     TTS_SERVICE_URL,
 )
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger(__name__)
 

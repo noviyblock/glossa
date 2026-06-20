@@ -40,11 +40,11 @@ def _load_onnx_session(model_path: Path) -> Any:
     return session
 
 
-def _run_inference(session: Any, X: np.ndarray, batch_size: int = 32) -> list[int]:
+def _run_inference(session: Any, x: np.ndarray, batch_size: int = 32) -> list[int]:
     preds: list[int] = []
     input_name = session.get_inputs()[0].name
-    for i in range(0, len(X), batch_size):
-        batch = X[i : i + batch_size].astype(np.float32)
+    for i in range(0, len(x), batch_size):
+        batch = x[i : i + batch_size].astype(np.float32)
         logits = session.run(None, {input_name: batch})[0]
         preds.extend(logits.argmax(axis=1).tolist())
     return preds
@@ -53,10 +53,10 @@ def _run_inference(session: Any, X: np.ndarray, batch_size: int = 32) -> list[in
 def _write_confusion_csv(confusion: list[list[int]], class_names: list[str], out_path: Path) -> None:
     with out_path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([""] + class_names)
+        writer.writerow(["", *class_names])
         for i, row in enumerate(confusion):
             name = class_names[i] if i < len(class_names) else str(i)
-            writer.writerow([name] + row)
+            writer.writerow([name, *row])
 
 
 def run(
@@ -90,7 +90,7 @@ def run(
     if not test_dir.exists():
         raise FileNotFoundError(f"Test split not found: {test_dir}")
 
-    X_test = np.load(test_dir / "features.npy")
+    x_test = np.load(test_dir / "features.npy")
     y_test = np.load(test_dir / "labels.npy").tolist()
     class_names_path = test_dir.parent / "class_names.json"
     class_names = json.loads(class_names_path.read_text()) if class_names_path.exists() else []
@@ -110,11 +110,11 @@ def run(
         run_id = run.info.run_id
 
         # Classification metrics
-        y_pred = _run_inference(session, X_test)
+        y_pred = _run_inference(session, x_test)
         metrics = compute_gesture_metrics(y_test, y_pred, class_names)
 
         # Latency profile
-        sample_input = X_test[:1].astype(np.float32)
+        sample_input = x_test[:1].astype(np.float32)
         input_name = session.get_inputs()[0].name
         latency = profile_latency(
             fn=lambda: session.run(None, {input_name: sample_input}),
@@ -124,7 +124,7 @@ def run(
 
         # Memory profile
         mem_profile, _ = profile_memory(
-            lambda: session.run(None, {input_name: X_test[:32].astype(np.float32)})
+            lambda: session.run(None, {input_name: x_test[:32].astype(np.float32)})
         )
 
         # Log everything

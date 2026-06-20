@@ -11,17 +11,18 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mlops.config import get_settings
 from mlops.tracking.experiment_tracker import ExperimentTracker
 from mlops.tracking.metrics import (
-    compute_nlp_metrics,
     compute_asr_metrics,
+    compute_nlp_metrics,
     profile_latency,
-    profile_memory,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _load_translation_pairs(data_path: Path) -> tuple[list[str], list[str]]:

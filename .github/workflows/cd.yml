@@ -17,11 +17,24 @@ env:
   IMAGE_PREFIX: ${{ github.repository_owner }}/glossa
 
 jobs:
+  check-secrets:
+    name: Check Deploy Secrets
+    runs-on: ubuntu-latest
+    outputs:
+      staging_configured: ${{ steps.check.outputs.staging_configured }}
+    steps:
+      - name: Check staging secrets
+        id: check
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+        run: echo "staging_configured=${{ env.STAGING_HOST != '' }}" >> "$GITHUB_OUTPUT"
+
   deploy-staging:
     name: Deploy to Staging
     runs-on: ubuntu-latest
     environment: staging
-    if: github.ref == 'refs/heads/main'
+    needs: check-secrets
+    if: github.ref == 'refs/heads/main' && needs.check-secrets.outputs.staging_configured == 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     needs: deploy-staging
-    if: github.event.inputs.environment == 'production' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production'
 
     steps:
       - uses: actions/checkout@v4

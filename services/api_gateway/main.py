@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
-from contextlib import asynccontextmanager
 
-import httpx
-import redis.asyncio as aioredis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import httpx
+import redis.asyncio as aioredis
 
-from config import HTTP_TIMEOUT, REDIS_URL, SERVICE_PORT
+from config import HTTP_TIMEOUT, REDIS_URL
 from models import TranslateRequest, TranslateResponse
 from orchestrator import Orchestrator
 from ws_handler import SessionManager
@@ -217,10 +217,8 @@ async def ws_translate(ws: WebSocket, mode: str):
         logger.info("WS disconnected session=%s", session_id)
     except Exception:
         logger.exception("WS error session=%s", session_id)
-        try:
+        with contextlib.suppress(Exception):
             await _send("error", {"message": "internal server error"})
-        except Exception:
-            pass
     finally:
         if session_id:
             _sessions.unregister(session_id)
