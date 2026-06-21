@@ -1,0 +1,5 @@
+outs:
+- md5: 5963bb23b9dbeaa037cbd1231dc48426
+  size: 134399116
+  hash: md5
+  path: dw-ll_ucoco_384.onnx

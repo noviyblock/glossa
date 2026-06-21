@@ -1,0 +1,5 @@
+outs:
+- md5: 67404e8706aeb0d6d3d354aecd6f42a4
+  size: 216746733
+  hash: md5
+  path: yolox_l.onnx
