@@ -96,6 +96,18 @@ async def translate(req: TranslateRequest):
         return JSONResponse(status_code=400, content={"error": str(exc)})
     except RuntimeError as exc:
         return JSONResponse(status_code=503, content={"error": str(exc)})
+    except httpx.TimeoutException as exc:
+        logger.error("Upstream timeout session=%s: %s", session_id, exc)
+        return JSONResponse(
+            status_code=504,
+            content={"error": f"Upstream service timed out: {exc}"},
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.error("Upstream error session=%s: %s", session_id, exc)
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"Upstream service error: {exc}"},
+        )
 
     return TranslateResponse(
         translation=result["translation"],
