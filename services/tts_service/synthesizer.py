@@ -68,7 +68,8 @@ class Synthesizer:
             trust_repo=True,
         )
         self._model.to(DEVICE)
-        self._model.eval()
+        if hasattr(self._model, "eval"):
+            self._model.eval()
         self._cache = _LRUCache(CACHE_SIZE)
         logger.info("Silero TTS ready — sample_rate=%d device=%s", SAMPLE_RATE, DEVICE)
 
