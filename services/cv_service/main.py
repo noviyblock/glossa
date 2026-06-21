@@ -34,11 +34,7 @@ _ready = False
 async def lifespan(app: FastAPI):
     global _extractor, _normalizer, _classifier, _redis, _ready
     logger.info("Loading models…")
-    _extractor  = KeypointExtractor(
-        model_complexity=1,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
+    _extractor  = KeypointExtractor()
     _normalizer = Normalizer(cfg.NORM_STATS_PATH)
     _classifier = GestureClassifier(
         ov_xml_path=cfg.OV_XML_PATH,
