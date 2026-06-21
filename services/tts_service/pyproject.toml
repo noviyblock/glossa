@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "numpy>=1.26",
     "orjson>=3.10",
+    "omegaconf>=2.3",
 ]
 
 [tool.hatch.build.targets.wheel]
