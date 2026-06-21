@@ -17,6 +17,11 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Pre-create the torch hub cache mount point owned by the non-root user, so
+# Docker initialises the named volume with correct ownership on first mount
+# (otherwise it defaults to root and torch.hub.load() fails with EACCES).
+RUN mkdir -p /torch_cache && chown -R glossa:glossa /torch_cache
+
 # ── CPU deps ──────────────────────────────────────────────────────────────────
 FROM base AS deps-cpu
 COPY pyproject.toml .
