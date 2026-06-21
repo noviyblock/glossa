@@ -23,7 +23,7 @@ class FaceLandmarks(GlossaModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
-class HolisticFrame(GlossaModel):
+class KeypointFrame(GlossaModel):
     frame_index: int = Field(ge=0)
     timestamp_ms: float = Field(ge=0.0)
     pose: list[PoseLandmark] | None = None           # 33 landmarks
@@ -34,7 +34,7 @@ class HolisticFrame(GlossaModel):
 
 class GestureRecognitionRequest(GlossaModel):
     session_id: UUID
-    frames: list[HolisticFrame] = Field(min_length=1)
+    frames: list[KeypointFrame] = Field(min_length=1)
     fps: float = Field(default=30.0, gt=0.0)
 
 

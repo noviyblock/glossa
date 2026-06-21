@@ -4,7 +4,7 @@ from .cv import (
     GestureRecognitionRequest,
     GestureRecognitionResult,
     HandLandmarks,
-    HolisticFrame,
+    KeypointFrame,
     PoseLandmark,
 )
 from .nlp import NLPRequest, NLPResult, RAGDocument
@@ -22,7 +22,7 @@ __all__ = [
     "GlossaModel",
     "HandLandmarks",
     "HealthResponse",
-    "HolisticFrame",
+    "KeypointFrame",
     "NLPRequest",
     "NLPResult",
     "PoseLandmark",

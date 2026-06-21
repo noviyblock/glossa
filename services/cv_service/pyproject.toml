@@ -5,12 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "glossa-cv-service"
 version = "0.1.0"
-description = "Computer Vision service — MediaPipe Holistic + ONNX/OpenVINO gesture classifier"
+description = "Computer Vision service — DWPose (YOLOX + RTMPose) + ONNX/OpenVINO gesture classifier"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi[standard]>=0.111",
     "uvicorn[standard]>=0.29",
-    "mediapipe>=0.10,<0.10.15",  # solutions.holistic (legacy API) removed in later releases
     "onnxruntime>=1.18",
     "numpy>=1.26",
     "opencv-python-headless>=4.9",

@@ -46,7 +46,7 @@ warn_return_any = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["mediapipe.*", "onnxruntime.*", "openvino.*", "silero.*", "mlflow.*"]
+module = ["onnxruntime.*", "openvino.*", "silero.*", "mlflow.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

@@ -1,4 +1,4 @@
-"""Gesture classifier training pipeline — real ST-GCN on 75 MediaPipe nodes.
+"""Gesture classifier training pipeline — real ST-GCN on 75 DWPose nodes.
 
 Usage:
     python -m mlops.pipelines.train_gesture
@@ -29,21 +29,37 @@ except ImportError:
     _SLOVO_AVAILABLE = False
 
 # ── Graph topology ────────────────────────────────────────────────────────────
-# MediaPipe Holistic: 33 Pose + 21 Left Hand + 21 Right Hand = 75 nodes
-# Pose: 0-32 | Left Hand: 33-53 | Right Hand: 54-74
+# DWPose (COCO-WholeBody) → 75 nodes, matching the offline dataset-extraction
+# script and services/cv_service/keypoint_extractor.py:
+#   0-16   COCO body (17 pts)
+#   17-22  COCO feet (6 pts)
+#   23-32  duplicated key joints (shoulders/hips/knees/ankles), padding to 33
+#   33-53  left hand  (21 pts)
+#   54-74  right hand (21 pts)
 
-_POSE_EDGES = [
-    (0, 1), (1, 2), (2, 3), (3, 7),
-    (0, 4), (4, 5), (5, 6), (6, 8),
-    (9, 10),
-    (11, 12),
-    (11, 13), (13, 15),
-    (12, 14), (14, 16),
-    (15, 17), (15, 19), (15, 21), (17, 19),
-    (16, 18), (16, 20), (16, 22), (18, 20),
-    (11, 23), (12, 24), (23, 24),
-    (23, 25), (24, 26), (25, 27), (26, 28),
-    (27, 29), (27, 31), (28, 30), (28, 32), (29, 31), (30, 32),
+_COCO_EDGES = [
+    (0, 1), (0, 2), (1, 3), (2, 4),           # nose → eyes/ears
+    (5, 6), (5, 7), (6, 8), (7, 9),           # shoulders → elbows → wrists
+    (5, 11), (6, 12), (11, 12),               # shoulders → hips
+    (11, 13), (13, 15), (15, 17), (17, 19),   # left leg
+    (12, 14), (14, 16), (16, 18), (18, 20),   # right leg
+    (0, 5), (0, 6),                           # nose → shoulders
+    (5, 7), (7, 9),                           # left arm
+    (6, 8), (8, 10),                          # right arm
+]
+
+_FEET_EDGES = [
+    (17, 19), (19, 21),  # left foot
+    (18, 20), (20, 22),  # right foot
+    (17, 18),            # cross-link
+]
+
+_EXTRA_EDGES = [
+    (23, 5), (24, 6),
+    (25, 11), (26, 12),
+    (27, 13), (28, 14),
+    (29, 15), (30, 16),
+    (31, 5), (32, 6),
 ]
 
 _HAND_EDGES = [
@@ -55,27 +71,38 @@ _HAND_EDGES = [
     (5, 9), (9, 13), (13, 17), (5, 17),    # palm cross-links
 ]
 
+_FACE_NODES = [1, 2, 3, 8, 9, 10]  # connected directly to nose (node 0)
+
 _LEFT_HAND_OFFSET = 33
 _RIGHT_HAND_OFFSET = 54
 _NUM_NODES = 75
 
 
 def build_adjacency() -> np.ndarray:
-    """Build symmetric-normalised adjacency matrix for 75 MediaPipe nodes.
+    """Build symmetric-normalised adjacency matrix for 75 DWPose nodes.
 
     Returns D^{-1/2} (A + I) D^{-1/2} as float32 array of shape (75, 75).
     """
     A = np.eye(_NUM_NODES, dtype=np.float32)
-    for i, j in _POSE_EDGES:
+    for i, j in _COCO_EDGES:
+        if i < 17 and j < 17:
+            A[i, j] = A[j, i] = 1.0
+    for i, j in _FEET_EDGES:
         A[i, j] = A[j, i] = 1.0
+    for i, j in _EXTRA_EDGES:
+        A[i, j] = A[j, i] = 1.0
+    for node in _FACE_NODES:
+        A[node, 0] = A[0, node] = 1.0
     for i, j in _HAND_EDGES:
         a, b = i + _LEFT_HAND_OFFSET, j + _LEFT_HAND_OFFSET
         A[a, b] = A[b, a] = 1.0
         a, b = i + _RIGHT_HAND_OFFSET, j + _RIGHT_HAND_OFFSET
         A[a, b] = A[b, a] = 1.0
-    # Cross: pose wrists connect to hand root nodes
-    A[15, _LEFT_HAND_OFFSET] = A[_LEFT_HAND_OFFSET, 15] = 1.0
-    A[16, _RIGHT_HAND_OFFSET] = A[_RIGHT_HAND_OFFSET, 16] = 1.0
+    # Cross: wrists connect to hand root nodes
+    A[7, _LEFT_HAND_OFFSET] = A[_LEFT_HAND_OFFSET, 7] = 1.0
+    A[4, _RIGHT_HAND_OFFSET] = A[_RIGHT_HAND_OFFSET, 4] = 1.0
+    A[5, _LEFT_HAND_OFFSET] = A[_LEFT_HAND_OFFSET, 5] = 1.0
+    A[6, _RIGHT_HAND_OFFSET] = A[_RIGHT_HAND_OFFSET, 6] = 1.0
     # Symmetric normalisation
     deg = A.sum(axis=1)
     d_inv_sqrt = np.where(deg > 0, 1.0 / np.sqrt(deg), 0.0)
@@ -246,7 +273,7 @@ def _load_dataset(
         labels: list[int] = []
         for s in samples:
             try:
-                kp = ds.load_keypoints_mediapipe(s, target_len=seq_len)
+                kp = ds.load_keypoints_dwpose(s, target_len=seq_len)
             except Exception:
                 continue
             kp = kp.reshape(seq_len, _NUM_NODES, 3)  # ensure (T, 75, 3)
@@ -439,7 +466,7 @@ def run(params_path: str = "params.yaml", dry_run: bool = False,
             tags=run_tags,
             description=(
                 f"ST-GCN gesture classifier — {num_classes} RSL classes, "
-                f"{_NUM_NODES} MediaPipe nodes, seq_len={seq_len}"
+                f"{_NUM_NODES} DWPose nodes, seq_len={seq_len}"
             ),
         )
 

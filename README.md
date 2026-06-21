@@ -18,7 +18,7 @@
   ┌────▼────┐        ┌────▼────┐    ┌──────────────┐
   │   CV    │        │   ASR   │    │     NLP      │
   │ :8001   │        │ :8002   │    │    :8003     │
-  │MediaPipe│        │ Faster  │    │ Qwen2-1.5B   │
+  │ DWPose  │        │ Faster  │    │ Qwen2-1.5B   │
   │+ONNX/OV │        │ Whisper │    │  (QLoRA)     │
   └────┬────┘        └────┬────┘    └──────┬───────┘
        │                  │                │
@@ -30,7 +30,7 @@
                                   └─────────────────┘
 ```
 
-**РЖЯ → Текст:** кадры камеры → CV (скелет MediaPipe + ST-GCN) → NLP (глоссы → русский) → TTS (аудио)  
+**РЖЯ → Текст:** кадры камеры → CV (скелет DWPose + ST-GCN) → NLP (глоссы → русский) → TTS (аудио)  
 **Текст → РЖЯ:** текст/микрофон → ASR (Whisper) → NLP (русский → глоссы) → вывод глосс
 
 ---
@@ -72,7 +72,7 @@ open http://localhost:9090        # Prometheus
 | Сервис          | Порт | Технология                             | Назначение                  |
 |-----------------|------|----------------------------------------|-----------------------------|
 | `api-gateway`   | 8000 | FastAPI + WebSocket                    | Точка входа, оркестрация    |
-| `cv-service`    | 8001 | MediaPipe Holistic + ONNX / OpenVINO   | Скелет + классификатор жест |
+| `cv-service`    | 8001 | DWPose (YOLOX+RTMPose) + ONNX / OpenVINO   | Скелет + классификатор жест |
 | `asr-service`   | 8002 | faster-whisper base (int8)             | Речь → текст                |
 | `nlp-service`   | 8003 | Qwen2-1.5B-Instruct (QLoRA)            | Перевод глоссы ↔ русский    |
 | `tts-service`   | 8004 | Silero TTS v4                          | Текст → речь                |
@@ -251,7 +251,7 @@ dvc repro
 glossa/
 ├── services/
 │   ├── api_gateway/        # WebSocket + REST оркестратор
-│   ├── cv_service/         # MediaPipe + ST-GCN
+│   ├── cv_service/         # DWPose + ST-GCN
 │   ├── asr_service/        # faster-whisper
 │   ├── nlp_service/        # Qwen2-1.5B
 │   └── tts_service/        # Silero TTS
@@ -284,7 +284,7 @@ glossa/
 | Слой         | Технология                                          |
 |--------------|-----------------------------------------------------|
 | Runtime      | Python 3.11, FastAPI, uvicorn[uvloop]               |
-| CV           | MediaPipe Holistic (75 точек), ONNX Runtime, OpenVINO |
+| CV           | DWPose (YOLOX+RTMPose, 75 точек), ONNX Runtime, OpenVINO |
 | Классификатор| ST-GCN, скользящее окно 32 кадра, шаг 15           |
 | ASR          | faster-whisper base (CTranslate2, int8)             |
 | NLP          | Qwen2-1.5B-Instruct, QLoRA (lora_r=64, lora_alpha=128) |

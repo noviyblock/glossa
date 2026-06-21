@@ -60,7 +60,7 @@ def make_pose_keypoints(
     n_landmarks: int = 33,
     noise: float = 0.02,
 ) -> list[list[float]]:
-    """Generate realistic MediaPipe Holistic landmark coordinates."""
+    """Generate realistic DWPose landmark coordinates."""
     rng = random.Random()
     landmarks = []
     for i in range(n_landmarks):
