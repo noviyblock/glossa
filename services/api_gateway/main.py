@@ -27,7 +27,7 @@ _http:         httpx.AsyncClient | None = None
 _START = time.time()
 
 
-@asynccontextmanager
+@contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global _orchestrator, _sessions, _redis, _http
 

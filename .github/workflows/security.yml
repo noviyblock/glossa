@@ -62,9 +62,9 @@ jobs:
             -o bandit-results.sarif \
             --severity-level medium \
             --confidence-level medium || true
-          # Ensure a valid (possibly empty) SARIF file always exists for upload
+          # Ensure a valid SARIF file with at least one run always exists for upload
           if [ ! -s bandit-results.sarif ]; then
-            echo '{"version":"2.1.0","runs":[]}' > bandit-results.sarif
+            echo '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Bandit"}},"results":[]}]}' > bandit-results.sarif
           fi
 
       - name: Upload SARIF

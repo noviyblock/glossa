@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import io
 import logging
 import os
-import wave
-from collections import OrderedDict
 from threading import Lock
+import wave
 
 import torch
 

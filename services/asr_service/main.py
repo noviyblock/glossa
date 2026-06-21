@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
+import contextlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -99,7 +99,7 @@ async def ws_transcribe(ws: WebSocket):
         while True:
             try:
                 msg = await asyncio.wait_for(ws.receive_json(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await ws.send_json({"type": "ping"})
                 continue
 
@@ -116,9 +116,7 @@ async def ws_transcribe(ws: WebSocket):
             t0 = time.perf_counter()
 
             # Emit partial results as segments arrive
-            accumulated: list[str] = []
-
-            def _stream() -> list[str]:
+            def _stream(raw: bytes = raw) -> list[str]:
                 parts = []
                 for partial_text in _transcriber.transcribe_stream(raw):
                     parts.append(partial_text)
@@ -146,7 +144,5 @@ async def ws_transcribe(ws: WebSocket):
         logger.info("WS disconnected: session=%s", session_id)
     except Exception:
         logger.exception("WS error: session=%s", session_id)
-        try:
+        with contextlib.suppress(Exception):
             await ws.send_json({"type": "error", "message": "internal error"})
-        except Exception:
-            pass

@@ -2,11 +2,13 @@
 
 All transforms operate on numpy arrays of shape (T, J, C):
     T = time steps (frames)
-    J = joints  — 75 for MediaPipe Holistic
-    C = coordinates — 3 (x, y, z), all normalised to [0, 1] by MediaPipe
+    J = joints  — 75 for DWPose (COCO-WholeBody → 75-point remap)
+    C = coordinates — 3 (x, y, score), normalised to [0, 1]
 
-MediaPipe Holistic joint layout:
-    [0:33]  — body pose (33 joints)
+DWPose joint layout (see services/cv_service/keypoint_extractor.py):
+    [0:17]  — COCO body (17 joints)
+    [17:23] — COCO feet (6 joints)
+    [23:33] — duplicated key joints (shoulders/hips/knees/ankles), padding to 33
     [33:54] — left hand (21 joints)
     [54:75] — right hand (21 joints)
 """
@@ -21,8 +23,8 @@ POSE_SLICE  = slice(0, 33)
 LHAND_SLICE = slice(33, 54)
 RHAND_SLICE = slice(54, 75)
 
-# Upper-body joints used in RSL (shoulders=11,12 elbows=13,14 wrists=15,16)
-SIGNING_JOINTS = list(range(11, 17)) + list(range(33, 75))
+# Upper-body joints used in RSL (shoulders=5,6 elbows=7,8 wrists=9,10)
+SIGNING_JOINTS = list(range(5, 11)) + list(range(33, 75))
 
 
 @dataclass
@@ -44,7 +46,7 @@ class PreprocessConfig:
 def impute_missing(kp: np.ndarray, threshold: float = 0.02) -> np.ndarray:
     """Linear-interpolate joints that are near-zero across all axes (not tracked).
 
-    MediaPipe sets undetected landmarks to (0, 0, 0). We detect these frames
+    DWPose sets undetected landmarks to (0, 0, 0). We detect these frames
     per joint and replace them via linear interpolation from valid neighbours.
     If the joint is never visible, leave as zeros.
     """
@@ -75,15 +77,15 @@ def normalize_keypoints(kp: np.ndarray) -> np.ndarray:
     """
     kp = kp.copy()
 
-    # 1. Hip-centre translation (joints 23=left hip, 24=right hip in MediaPipe)
-    if kp.shape[1] > 24:
-        hip_mid = (kp[:, 23, :2] + kp[:, 24, :2]) / 2.0  # (T, 2)
+    # 1. Hip-centre translation (joints 11=left hip, 12=right hip in COCO)
+    if kp.shape[1] > 12:
+        hip_mid = (kp[:, 11, :2] + kp[:, 12, :2]) / 2.0  # (T, 2)
         kp[:, :, :2] -= hip_mid[:, np.newaxis, :]
 
-    # 2. Shoulder-width scaling (joints 11=left shoulder, 12=right shoulder)
-    if kp.shape[1] > 12:
+    # 2. Shoulder-width scaling (joints 5=left shoulder, 6=right shoulder)
+    if kp.shape[1] > 6:
         sh_width = np.mean(
-            np.linalg.norm(kp[:, 11, :2] - kp[:, 12, :2], axis=-1)
+            np.linalg.norm(kp[:, 5, :2] - kp[:, 6, :2], axis=-1)
         )
         if sh_width > 1e-6:
             kp[:, :, :2] /= sh_width

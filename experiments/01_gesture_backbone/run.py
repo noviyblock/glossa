@@ -1,7 +1,7 @@
 """Experiment 01 — Gesture Recognition Backbone Comparison.
 
 Compares three approaches on the Slovo RSL dataset:
-  A. STGCN (skeleton-based, our choice)  — MediaPipe keypoints
+  A. STGCN (skeleton-based, our choice)  — DWPose keypoints
   B. S3D   (video-based, Sber baseline)  — RGB frames, ai-forever/slovo
   C. ResNet3D-50 (video-based baseline)  — RGB frames
 
@@ -95,7 +95,7 @@ def _evaluate_model(
 
     for sample in samples[:n_samples]:
         if use_keypoints:
-            x = dataset.load_keypoints_mediapipe(sample, target_len=seq_len)
+            x = dataset.load_keypoints_dwpose(sample, target_len=seq_len)
             x = x[np.newaxis]  # (1, T, 75, 3)
         else:
             x = dataset.load_frames(sample, target_len=seq_len)
@@ -186,7 +186,7 @@ class _SyntheticDataset:
     def by_split(self, _: str) -> list[Any]:
         return self._samples
 
-    def load_keypoints_mediapipe(self, _: Any, target_len: int = 30) -> np.ndarray:
+    def load_keypoints_dwpose(self, _: Any, target_len: int = 30) -> np.ndarray:
         return np.random.randn(target_len, 75, 3).astype(np.float32)
 
     def load_frames(self, _: Any, target_len: int = 30, size: tuple = (224, 224)) -> np.ndarray:

@@ -7,7 +7,7 @@ from typing import TypedDict
 
 import numpy as np
 
-from config import CLASS_MAP_PATH, ONNX_MOBILE_PATH, OV_XML_PATH, WINDOW_SIZE, NUM_JOINTS, IN_CHANNELS
+from config import CLASS_MAP_PATH, ONNX_MOBILE_PATH, OV_XML_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class GestureClassifier:
         inp = window[np.newaxis].astype(np.float32)  # (1, T, J, C)
 
         if self._backend == "openvino":
-            output = list(self._session.outputs)[0]
+            output = next(iter(self._session.outputs))
             logits = self._session([inp])[output]   # (1, num_classes)
         else:
             input_name = self._session.get_inputs()[0].name

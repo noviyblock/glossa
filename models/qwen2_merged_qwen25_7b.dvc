@@ -1,0 +1,6 @@
+outs:
+- md5: d2d82378e50fea5d315d4c3735b79c41.dir
+  size: 11427218
+  nfiles: 5
+  hash: md5
+  path: qwen2_merged_qwen25_7b

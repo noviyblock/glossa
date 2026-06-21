@@ -23,7 +23,6 @@ dependencies = [
 gesture = [
     "onnxruntime>=1.17",
     "onnxruntime-openvino>=1.17",
-    "mediapipe>=0.10",
     "opencv-python>=4.9",
     "torch>=2.2",
     "torchvision>=0.17",

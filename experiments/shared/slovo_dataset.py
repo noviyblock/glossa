@@ -226,27 +226,32 @@ class SlovoDataset:
 
         return arr  # (T, H, W, 3)
 
-    def load_keypoints_mediapipe(
+    def load_keypoints_dwpose(
         self,
         sample: SlovoSample,
         target_len: int = 64,
     ) -> np.ndarray:
-        """Extract MediaPipe Holistic keypoints → float32 (T, 75, 3).
+        """Extract DWPose (YOLOX + RTMPose) keypoints → float32 (T, 75, 3).
 
-        Returns concatenated pose (33) + left_hand (21) + right_hand (21) landmarks.
+        Uses the same COCO-WholeBody → 75-point remap as
+        services/cv_service/keypoint_extractor.py (body 0-16, feet 17-22,
+        duplicated joints 23-32, left hand 33-53, right hand 54-74), so
+        offline-extracted features stay consistent with live inference.
         """
         try:
             import cv2
-            import mediapipe as mp  # type: ignore[import]
-        except ImportError as e:
-            raise ImportError("pip install mediapipe opencv-python") from e
+            import sys
+            from pathlib import Path
 
-        holistic = mp.solutions.holistic.Holistic(
-            static_image_mode=False,
-            model_complexity=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "services" / "cv_service"))
+            from keypoint_extractor import KeypointExtractor  # type: ignore[import]
+        except ImportError as e:
+            raise ImportError(
+                "pip install onnxruntime opencv-python; "
+                "requires DWPose ONNX weights (DWPOSE_DET_PATH, DWPOSE_POSE_PATH)"
+            ) from e
+
+        extractor = KeypointExtractor()
 
         cap = cv2.VideoCapture(str(sample.video_path))
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
@@ -262,22 +267,10 @@ class SlovoDataset:
             if not ok:
                 sequences.append(np.zeros((75, 3), dtype=np.float32))
                 continue
-
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            result = holistic.process(rgb)
-
-            def _lm(landmarks, n: int) -> np.ndarray:
-                if landmarks is None:
-                    return np.zeros((n, 3), dtype=np.float32)
-                return np.array([[l.x, l.y, l.z] for l in landmarks.landmark], dtype=np.float32)
-
-            pose  = _lm(result.pose_landmarks, 33)
-            lhand = _lm(result.left_hand_landmarks, 21)
-            rhand = _lm(result.right_hand_landmarks, 21)
-            sequences.append(np.concatenate([pose, lhand, rhand], axis=0))  # (75, 3)
+            sequences.append(extractor.extract(frame))  # (75, 3)
 
         cap.release()
-        holistic.close()
+        extractor.close()
 
         if not sequences:
             return np.zeros((target_len, 75, 3), dtype=np.float32)

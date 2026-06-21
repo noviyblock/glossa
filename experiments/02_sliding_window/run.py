@@ -120,7 +120,7 @@ def _eval_config(
     for sample in test_samples[:n_samples]:
         # Load a longer sequence (2× window) so sliding window has material to slide over
         full_len = max(window * 2, 60)
-        kp = dataset.load_keypoints_mediapipe(sample, target_len=full_len)
+        kp = dataset.load_keypoints_dwpose(sample, target_len=full_len)
 
         t0 = time.perf_counter()
         preds = sliding_window_predict(session, kp, window, stride, threshold)
@@ -164,7 +164,7 @@ class _SyntheticDataset:
     def by_split(self, _: str) -> list[Any]:
         return self._samples
 
-    def load_keypoints_mediapipe(self, _: Any, target_len: int = 60) -> np.ndarray:
+    def load_keypoints_dwpose(self, _: Any, target_len: int = 60) -> np.ndarray:
         return np.random.randn(target_len, 75, 3).astype(np.float32)
 
 

@@ -13,7 +13,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -69,13 +68,22 @@ Thumbs.db
 # Models & data (tracked by DVC — git only sees *.dvc pointer files)
 # Binary extensions kept as safety net; DVC manages models/.gitignore and data/.gitignore
 *.onnx
+*.onnx.data
 *.pt
 *.pth
 *.gguf
 *.npz
 *.safetensors
+*.bin
 # data/ and models/ — NOT ignored at root level so DVC can place *.dvc pointer files here.
 # DVC auto-creates data/.gitignore and models/.gitignore to ignore the actual binaries.
+
+# Large raw/preprocessed dataset archives and model-weight caches —
+# must go through `dvc add`, never directly into git (GitHub hard limit 100MB)
+data/slovo_processed_T32.zip
+models/whisper/
+models/qwen2_lora_qwen25_7b/
+mlflow.db
 
 # MLflow
 mlruns/
@@ -98,3 +106,18 @@ dump.rdb
 
 # Claude Code
 .claude/
+
+# Flutter / Dart (clients/web, clients/mobile)
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.metadata
+**/android/.gradle/
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/web/.last_build_id
+*.iml

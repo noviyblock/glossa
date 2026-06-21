@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import io
 import logging
 import wave
-from typing import Iterator
 
-import numpy as np
 from faster_whisper import WhisperModel
+import numpy as np
 
 from config import BEAM_SIZE, COMPUTE_TYPE, DEVICE, LANGUAGE, VAD_FILTER, WHISPER_MODEL
 

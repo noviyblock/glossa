@@ -28,7 +28,7 @@ def test_normalize_collapses_whitespace(pre):
 
 
 def test_normalize_fixes_typographic_quotes(pre):
-    result = pre.normalize("«Привет» и "мир"")
+    result = pre.normalize('«Привет» и "мир"')
     assert "«" not in result
     assert "»" not in result
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from config import NORM_STATS_PATH, WINDOW_SIZE, NUM_JOINTS, IN_CHANNELS
+from config import NORM_STATS_PATH
 
 
 class Normalizer:

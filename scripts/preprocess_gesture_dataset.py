@@ -1,6 +1,6 @@
 """Preprocess the Slovo RSL gesture dataset into train/val/test numpy arrays.
 
-Reads raw keypoints (from SlovoDataset via MediaPipe Holistic) and applies the
+Reads raw keypoints (from SlovoDataset via DWPose) and applies the
 full preprocessing pipeline: imputation → length standardisation → normalisation.
 Saves compressed .npz splits that the training pipeline consumes.
 
@@ -81,7 +81,7 @@ def run(
             samples = samples[:n_samples]
 
         print(f"  {len(samples)} samples, {len(class_names)} classes")
-        print("  Extracting keypoints via MediaPipe Holistic ...")
+        print("  Extracting keypoints via DWPose ...")
 
         all_kp: list[np.ndarray] = []
         all_labels: list[int] = []
@@ -91,7 +91,7 @@ def run(
             if i % 500 == 0:
                 print(f"    {i}/{len(samples)} ...")
             try:
-                kp = ds.load_keypoints_mediapipe(s, target_len=None)  # raw length
+                kp = ds.load_keypoints_dwpose(s, target_len=None)  # raw length
                 all_kp.append(kp)
                 all_labels.append(s.label)
             except Exception as e:
@@ -99,7 +99,7 @@ def run(
                     print(f"    Warning: skipped sample {i}: {e}")
 
         if not all_kp:
-            raise RuntimeError("No keypoints extracted — check Slovo path and MediaPipe install")
+            raise RuntimeError("No keypoints extracted — check Slovo path and DWPose ONNX weights")
 
         print(f"  Extracted {len(all_kp)} keypoint sequences")
         all_kp = np.stack([

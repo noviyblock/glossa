@@ -79,7 +79,6 @@ async def synthesize(body: dict):
     if not text:
         return JSONResponse(status_code=400, content={"error": "text is empty"})
 
-    cache_key = f"{speaker}|{text}"
     hits_before = _synthesizer._cache.hits
 
     t0 = time.perf_counter()
