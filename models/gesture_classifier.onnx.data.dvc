@@ -1,0 +1,5 @@
+outs:
+- md5: 546d47b92e55aea50196e4fafdfb382b
+  size: 10158080
+  hash: md5
+  path: gesture_classifier.onnx.data

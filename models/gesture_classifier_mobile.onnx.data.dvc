@@ -1,0 +1,5 @@
+outs:
+- md5: d87e6075ae412638230c94b0688b4202
+  size: 8257536
+  hash: md5
+  path: gesture_classifier_mobile.onnx.data
