@@ -49,14 +49,34 @@ class SlovoDataset:
         split: str = "all",
         exclude_no_event: bool = True,
         label_mapping_path: str | Path | None = None,
+        class_filter_path: str | Path | None = None,
     ):
+        """
+        class_filter_path: optional path to a JSON file with either a top-level
+            "classes" list or a bare list of gloss strings (see
+            data/selected_classes_200.json). When set, only samples whose
+            `text` is in that list are loaded — used to train on a reduced
+            vocabulary subset instead of the full 1000 classes.
+        """
         self.root = Path(root)
         self.split = split
         self.exclude_no_event = exclude_no_event
         self._label_mapping_path = Path(label_mapping_path) if label_mapping_path else None
+        self._class_filter = self._load_class_filter(class_filter_path)
         self._samples: list[SlovoSample] = []
         self._label_map: dict[str, int] = {}
         self._load()
+
+    @staticmethod
+    def _load_class_filter(path: str | Path | None) -> set[str] | None:
+        if not path:
+            return None
+        import json as _json
+
+        with open(path, encoding="utf-8") as f:
+            data = _json.load(f)
+        classes = data["classes"] if isinstance(data, dict) else data
+        return set(classes)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -105,6 +125,8 @@ class SlovoDataset:
             for row in reader:
                 text = row["text"]
                 if self.exclude_no_event and text == "no_event":
+                    continue
+                if self._class_filter is not None and text not in self._class_filter:
                     continue
                 s = self._parse_split(row)
                 if self.split != "all" and s != self.split:
