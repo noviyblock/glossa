@@ -17,6 +17,8 @@ services:
               capabilities: [gpu]
 
   asr-service:
+    build:
+      target: production-gpu
     environment:
       - ASR_DEVICE=cuda
       - ASR_COMPUTE_TYPE=float16
@@ -29,6 +31,8 @@ services:
               capabilities: [gpu]
 
   nlp-service:
+    build:
+      target: production-gpu
     environment:
       - NLP_DEVICE=cuda
     deploy:
@@ -40,6 +44,8 @@ services:
               capabilities: [gpu]
 
   tts-service:
+    build:
+      target: production-gpu
     environment:
       - TTS_DEVICE=cuda
     deploy:
