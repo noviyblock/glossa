@@ -1,10 +1,10 @@
 import os
 
-WINDOW_SIZE      = int(os.getenv("WINDOW_SIZE", "32"))
+WINDOW_SIZE      = int(os.getenv("WINDOW_SIZE", "64"))
 NUM_JOINTS       = int(os.getenv("NUM_JOINTS", "75"))
 IN_CHANNELS      = int(os.getenv("IN_CHANNELS", "3"))
-NUM_CLASSES      = int(os.getenv("NUM_CLASSES", "1000"))
-WINDOW_STRIDE    = int(os.getenv("WINDOW_STRIDE", "15"))
+NUM_CLASSES      = int(os.getenv("NUM_CLASSES", "200"))
+WINDOW_STRIDE    = int(os.getenv("WINDOW_STRIDE", "30"))
 CONF_THRESHOLD   = float(os.getenv("CONF_THRESHOLD", "0.7"))
 ONNX_MOBILE_PATH = os.getenv("ONNX_MOBILE_PATH", "/models/gesture_classifier_mobile.onnx")
 OV_XML_PATH      = os.getenv("OV_XML_PATH", "/models/stgcn_topk_int8/stgcn_topk_int8.xml")
