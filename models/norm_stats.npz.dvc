@@ -1,5 +1,5 @@
 outs:
-- md5: dc54457e65d18b1205f8dfefbbc5e77e
+- md5: d110cb2344692e70e1e3edb346988f64
   size: 524
   hash: md5
   path: norm_stats.npz

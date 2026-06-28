@@ -1,6 +1,6 @@
 outs:
-- md5: 71d705a54b87d9817f5db6e242c76d89.dir
-  size: 3602345
-  nfiles: 10
+- md5: f1d295c6a5635e28ffa4fe55b6893332.dir
+  size: 4697649
+  nfiles: 12
   hash: md5
   path: translations

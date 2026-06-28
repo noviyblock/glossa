@@ -1,0 +1,6 @@
+outs:
+- md5: 0a3d821a3a1d0198e8bb4dd46d8c9fc8.dir
+  size: 2050236377
+  nfiles: 108
+  hash: md5
+  path: qwen2_lora_top200_qwen2_1.5b_slovo_synth
