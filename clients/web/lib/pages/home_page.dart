@@ -157,10 +157,11 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     final msg = jsonDecode(raw as String) as Map<String, dynamic>;
     final type = msg['type'] as String?;
+    final payload = msg['payload'] as Map<String, dynamic>? ?? const {};
 
     switch (type) {
       case 'gloss':
-        final items = (msg['glosses'] as List<dynamic>? ?? [])
+        final items = (payload['glosses'] as List<dynamic>? ?? [])
             .map((g) => _GlossItem(
                   g['gloss'] as String,
                   (g['prob'] as num).toDouble(),
@@ -175,11 +176,11 @@ class _HomePageState extends State<HomePage> {
         break;
 
       case 'result':
-        setState(() => _rslResult = msg['text'] as String? ?? '');
+        setState(() => _rslResult = payload['text'] as String? ?? '');
         break;
 
       case 'audio':
-        setState(() => _rslAudio = msg['audio'] as String? ?? '');
+        setState(() => _rslAudio = payload['wav'] as String? ?? '');
         _playAudio(_rslAudio);
         break;
 
@@ -216,15 +217,18 @@ class _HomePageState extends State<HomePage> {
       await for (final raw in _ttsWs!.stream) {
         final msg = jsonDecode(raw as String) as Map<String, dynamic>;
         final t = msg['type'] as String?;
+        final payload = msg['payload'] as Map<String, dynamic>? ?? const {};
         if (!mounted) break;
         if (t == 'result') {
           setState(() {
-            _glossSequence = msg['text'] as String? ?? '';
+            _glossSequence = payload['text'] as String? ?? '';
             _ttsProcessing = false;
           });
           break;
         } else if (t == 'chunk') {
-          setState(() => _asrText = msg['text'] as String? ?? '');
+          setState(() => _asrText = payload['text'] as String? ?? '');
+        } else if (t == 'audio') {
+          _playAudio(payload['wav'] as String? ?? '');
         } else if (t == 'error') {
           setState(() => _ttsProcessing = false);
           break;
