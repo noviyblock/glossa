@@ -11,8 +11,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../config.dart';
 
-// ── WebSocket message types ──────────────────────────────────────────────── //
-
 enum _WsStatus { disconnected, connecting, connected, error }
 
 class _GlossItem {
@@ -20,8 +18,6 @@ class _GlossItem {
   final double prob;
   const _GlossItem(this.gloss, this.prob);
 }
-
-// ── HomePage ─────────────────────────────────────────────────────────────── //
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -31,7 +27,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  // ── Camera / canvas ───────────────────────────────────────────────────── //
+  // ── Camera ───────────────────────────────────────────────────────────────── //
   web.HTMLVideoElement? _video;
   web.HTMLCanvasElement? _canvas;
   web.MediaStream? _mediaStream;
@@ -39,52 +35,39 @@ class _HomePageState extends State<HomePage> {
   bool _cameraActive = false;
   String _cameraError = '';
 
-  // ── WebSocket (RSL → Text) ────────────────────────────────────────────── //
+  // ── RSL → Text WS ────────────────────────────────────────────────────────── //
   WebSocketChannel? _rslWs;
   StreamSubscription<dynamic>? _rslSub;
   _WsStatus _rslStatus = _WsStatus.disconnected;
   List<_GlossItem> _glosses = [];
   String _rslResult = '';
-  String _rslAudio = ''; // base64 wav
-
-  // ── WebSocket (Text → RSL) ────────────────────────────────────────────── //
-  WebSocketChannel? _ttsWs;
-  StreamSubscription<dynamic>? _ttsSub;
-  _WsStatus _ttsStatus = _WsStatus.disconnected;
-  final _textCtrl = TextEditingController();
-  String _asrText = '';
-  String _glossSequence = '';
-  bool _ttsProcessing = false;
-
-  // ── Latency tracking ──────────────────────────────────────────────────── //
+  String _rslAudio = '';
   int? _latencyMs;
   DateTime? _lastFrameSent;
 
+  // ── Text → RSL (REST only) ───────────────────────────────────────────────── //
+  final _textCtrl = TextEditingController();
+  String _glossSequence = '';
+  bool _ttsProcessing = false;
+
   final _sessionId = const Uuid().v4();
 
-  // ── Camera ───────────────────────────────────────────────────────────── //
+  // ── Camera ───────────────────────────────────────────────────────────────── //
 
   Future<void> _startCamera() async {
     try {
-      final constraints = web.MediaStreamConstraints(
-        video: true.toJS,
-        audio: false.toJS,
-      );
-      final stream =
-          await web.window.navigator.mediaDevices.getUserMedia(constraints).toDart;
+      final stream = await web.window.navigator.mediaDevices
+          .getUserMedia(web.MediaStreamConstraints(video: true.toJS, audio: false.toJS))
+          .toDart;
       _mediaStream = stream;
-
       _video = web.HTMLVideoElement()
         ..srcObject = stream
         ..autoplay = true
         ..muted = true;
-
       _canvas = web.HTMLCanvasElement()
         ..width = 320
         ..height = 240;
-
       if (mounted) setState(() => _cameraActive = true);
-
       await _connectRslWs();
       _frameTimer = Timer.periodic(const Duration(milliseconds: 100), (_) => _sendFrame());
     } catch (e) {
@@ -108,25 +91,16 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _sendFrame() {
-    if (_video == null || _canvas == null) return;
-    if (_rslStatus != _WsStatus.connected) return;
-
+    if (_video == null || _canvas == null || _rslStatus != _WsStatus.connected) return;
     final ctx = _canvas!.getContext('2d') as web.CanvasRenderingContext2D?;
     if (ctx == null) return;
-
     ctx.drawImage(_video!, 0, 0);
-    final dataUrl = _canvas!.toDataURL('image/jpeg', 0.7.toJS);
-    final b64 = dataUrl.split(',').last;
-
+    final b64 = _canvas!.toDataURL('image/jpeg', 0.7.toJS).split(',').last;
     _lastFrameSent = DateTime.now();
-    _rslWs!.sink.add(jsonEncode({
-      'type': 'video_frame',
-      'frame': b64,
-      'session_id': _sessionId,
-    }));
+    _rslWs!.sink.add(jsonEncode({'type': 'video_frame', 'frame': b64, 'session_id': _sessionId}));
   }
 
-  // ── RSL → Text WebSocket ──────────────────────────────────────────────── //
+  // ── RSL → Text WS ────────────────────────────────────────────────────────── //
 
   Future<void> _connectRslWs() async {
     setState(() => _rslStatus = _WsStatus.connecting);
@@ -134,13 +108,12 @@ class _HomePageState extends State<HomePage> {
       _rslWs = WebSocketChannel.connect(Uri.parse(Config.wsRslToText));
       await _rslWs!.ready;
       setState(() => _rslStatus = _WsStatus.connected);
-
       _rslSub = _rslWs!.stream.listen(
         _onRslMessage,
         onError: (_) => setState(() => _rslStatus = _WsStatus.error),
         onDone: () => setState(() => _rslStatus = _WsStatus.disconnected),
       );
-    } catch (e) {
+    } catch (_) {
       setState(() => _rslStatus = _WsStatus.error);
     }
   }
@@ -162,10 +135,7 @@ class _HomePageState extends State<HomePage> {
     switch (type) {
       case 'gloss':
         final items = (payload['glosses'] as List<dynamic>? ?? [])
-            .map((g) => _GlossItem(
-                  g['gloss'] as String,
-                  (g['prob'] as num).toDouble(),
-                ))
+            .map((g) => _GlossItem(g['gloss'] as String, (g['prob'] as num).toDouble()))
             .toList();
         setState(() {
           _glosses = items;
@@ -174,142 +144,72 @@ class _HomePageState extends State<HomePage> {
           }
         });
         break;
-
       case 'result':
         setState(() => _rslResult = payload['text'] as String? ?? '');
         break;
-
       case 'audio':
         setState(() => _rslAudio = payload['wav'] as String? ?? '');
         _playAudio(_rslAudio);
         break;
-
       case 'error':
         setState(() => _rslStatus = _WsStatus.error);
         break;
     }
   }
 
-  // ── Text → RSL WebSocket ──────────────────────────────────────────────── //
+  // ── Text → RSL REST ──────────────────────────────────────────────────────── //
 
-  Future<void> _translateText() async {
+  Future<void> _sendText() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
-
     setState(() {
       _ttsProcessing = true;
-      _asrText = '';
       _glossSequence = '';
-      _ttsStatus = _WsStatus.connecting;
     });
-
     try {
-      _ttsWs = WebSocketChannel.connect(Uri.parse(Config.wsTextToRsl));
-      await _ttsWs!.ready;
-      setState(() => _ttsStatus = _WsStatus.connected);
-
-      _ttsWs!.sink.add(jsonEncode({
-        'type': 'text_input',
-        'text': text,
-        'session_id': _sessionId,
-      }));
-
-      await for (final raw in _ttsWs!.stream) {
-        final msg = jsonDecode(raw as String) as Map<String, dynamic>;
-        final t = msg['type'] as String?;
-        final payload = msg['payload'] as Map<String, dynamic>? ?? const {};
-        if (!mounted) break;
-        if (t == 'result') {
-          setState(() {
-            _glossSequence = payload['text'] as String? ?? '';
-            _ttsProcessing = false;
-          });
-          break;
-        } else if (t == 'chunk') {
-          setState(() => _asrText = payload['text'] as String? ?? '');
-        } else if (t == 'audio') {
-          _playAudio(payload['wav'] as String? ?? '');
-        } else if (t == 'error') {
-          setState(() => _ttsProcessing = false);
-          break;
-        }
-      }
-      await _ttsWs?.sink.close();
-      _ttsWs = null;
-      if (mounted) setState(() => _ttsStatus = _WsStatus.disconnected);
-    } catch (e) {
-      _ttsWs = null;
-      if (mounted) {
-        setState(() {
-          _ttsProcessing = false;
-          _ttsStatus = _WsStatus.error;
-        });
-      }
-    }
-
-    // Fallback: use REST endpoint
-    if (_glossSequence.isEmpty && mounted) {
-      await _translateTextRest(text);
-    }
-  }
-
-  Future<void> _translateTextRest(String text) async {
-    try {
-      final uri = Uri.parse('${Config.httpBase}/api/v1/translate');
       final resp = await http.post(
-        uri,
+        Uri.parse('${Config.httpBase}/api/v1/translate'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'mode': 'text_to_rsl',
-          'text': text,
-          'session_id': _sessionId,
-        }),
+        body: jsonEncode({'mode': 'text_to_rsl', 'text': text, 'session_id': _sessionId}),
       );
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
-      if (mounted) {
-        setState(() {
-          _glossSequence = data['translation'] as String? ?? '';
-          _ttsProcessing = false;
-        });
-      }
-    } catch (e) {
+      if (mounted) setState(() => _glossSequence = data['translation'] as String? ?? '');
+    } catch (_) {
+    } finally {
       if (mounted) setState(() => _ttsProcessing = false);
     }
   }
 
-  // ── Audio playback ────────────────────────────────────────────────────── //
-
   void _playAudio(String base64Wav) {
     if (base64Wav.isEmpty) return;
-    final dataUrl = 'data:audio/wav;base64,$base64Wav';
-    final audio = web.HTMLAudioElement()..src = dataUrl;
-    audio.play();
+    (web.HTMLAudioElement()..src = 'data:audio/wav;base64,$base64Wav').play();
   }
 
-  // ── UI ────────────────────────────────────────────────────────────────── //
+  // ── Build ─────────────────────────────────────────────────────────────────── //
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final isWide = MediaQuery.of(context).size.width >= 900;
+    final isWide = MediaQuery.of(context).size.width >= 800;
 
     return Scaffold(
       appBar: AppBar(
+        titleSpacing: 12,
         title: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.sign_language, color: cs.primary),
             const SizedBox(width: 8),
             const Text('Glossa'),
+            const SizedBox(width: 10),
+            _StatusDot(status: _rslStatus),
+            if (_latencyMs != null) ...[
+              const SizedBox(width: 8),
+              _LatencyChip(ms: _latencyMs!),
+            ],
           ],
         ),
         actions: [
-          _LatencyChip(ms: _latencyMs),
-          const SizedBox(width: 8),
-          _StatusDot(status: _rslStatus, label: 'RSL→Text'),
-          const SizedBox(width: 4),
-          _StatusDot(status: _ttsStatus, label: 'Text→RSL'),
-          const SizedBox(width: 16),
-          // Server URL field
           SizedBox(
             width: 220,
             child: _ServerUrlField(
@@ -320,74 +220,70 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(width: 12),
         ],
       ),
-      body: isWide ? _wideLayout(cs) : _narrowLayout(cs),
+      body: isWide
+          ? Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Expanded(flex: 3, child: _deafPanel(cs)),
+              const VerticalDivider(width: 1),
+              Expanded(flex: 2, child: _hearingPanel(cs)),
+            ])
+          : SingleChildScrollView(
+              child: Column(children: [
+                _deafPanel(cs),
+                const Divider(),
+                _hearingPanel(cs),
+              ]),
+            ),
     );
   }
 
-  Widget _wideLayout(ColorScheme cs) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(child: _leftColumn(cs)),
-        const VerticalDivider(width: 1),
-        Expanded(child: _rightColumn(cs)),
-      ],
-    );
-  }
+  // ── Левая панель — глухонемой ─────────────────────────────────────────────── //
 
-  Widget _narrowLayout(ColorScheme cs) {
+  Widget _deafPanel(ColorScheme cs) {
     return SingleChildScrollView(
-      child: Column(
-        children: [
-          _leftColumn(cs),
-          const Divider(),
-          _rightColumn(cs),
-        ],
-      ),
-    );
-  }
-
-  // ── Left column: RSL → Text ─────────────────────────────────────────── //
-
-  Widget _leftColumn(ColorScheme cs) {
-    return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Жест → Речь',
-              style: Theme.of(context).textTheme.titleLarge),
+          // Title
+          Row(children: [
+            Icon(Icons.sign_language, size: 18, color: cs.primary),
+            const SizedBox(width: 6),
+            Text('Показываю жесты',
+                style: Theme.of(context).textTheme.titleMedium),
+          ]),
           const SizedBox(height: 12),
 
-          // Camera preview area
-          AspectRatio(
-            aspectRatio: 4 / 3,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(12),
+          // Camera preview
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: AspectRatio(
+              aspectRatio: 4 / 3,
               child: _cameraActive
                   ? _WebCameraPreview(videoElement: _video!)
-                  : Container(
+                  : ColoredBox(
                       color: cs.surfaceContainerHighest,
                       child: Center(
                         child: _cameraError.isNotEmpty
-                            ? Text(_cameraError,
-                                style: TextStyle(color: cs.error))
-                            : Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.videocam_off_outlined,
-                                      size: 48, color: cs.outline),
-                                  const SizedBox(height: 8),
-                                  const Text('Камера не запущена'),
-                                ],
-                              ),
+                            ? Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Text(_cameraError,
+                                    style: TextStyle(color: cs.error),
+                                    textAlign: TextAlign.center),
+                              )
+                            : Column(mainAxisSize: MainAxisSize.min, children: [
+                                Icon(Icons.videocam_off_outlined,
+                                    size: 40, color: cs.outline),
+                                const SizedBox(height: 8),
+                                Text('Камера не запущена',
+                                    style: TextStyle(color: cs.onSurfaceVariant)),
+                              ]),
                       ),
                     ),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
 
-          // Camera toggle button
+          // Camera button
           FilledButton.icon(
             onPressed: _cameraActive ? _stopCamera : _startCamera,
             icon: Icon(_cameraActive ? Icons.stop : Icons.videocam),
@@ -400,117 +296,184 @@ class _HomePageState extends State<HomePage> {
                 : null,
           ),
 
-          const SizedBox(height: 16),
-
-          // Gloss results
+          // Top-3 glosses as compact chips
           if (_glosses.isNotEmpty) ...[
-            Text('Топ-3 глоссы',
-                style: Theme.of(context).textTheme.labelLarge),
-            const SizedBox(height: 8),
-            ..._glosses.asMap().entries.map(
-                  (e) => _WebGlossRow(item: e.value, rank: e.key + 1, cs: cs),
-                ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: _glosses.asMap().entries.map((e) {
+                final isTop = e.key == 0;
+                final pct = (e.value.prob * 100).toStringAsFixed(0);
+                return Chip(
+                  avatar: CircleAvatar(
+                    radius: 10,
+                    backgroundColor:
+                        isTop ? cs.primary : cs.surfaceContainerHighest,
+                    child: Text(
+                      '${e.key + 1}',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: isTop ? cs.onPrimary : cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  label: Text(
+                    '${e.value.gloss}  $pct%',
+                    style: TextStyle(
+                      fontWeight:
+                          isTop ? FontWeight.bold : FontWeight.normal,
+                      fontSize: 13,
+                    ),
+                  ),
+                  backgroundColor:
+                      isTop ? cs.primaryContainer : cs.surfaceContainerLow,
+                  side: BorderSide.none,
+                );
+              }).toList(),
+            ),
           ],
 
-          // Translation result
-          if (_rslResult.isNotEmpty)
+          // Message from hearing person (gloss sequence reply)
+          if (_glossSequence.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            const Divider(),
+            const SizedBox(height: 8),
+            Row(children: [
+              Icon(Icons.chat_bubble_outline, size: 15, color: cs.secondary),
+              const SizedBox(width: 6),
+              Text('Сообщение от собеседника',
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelMedium
+                      ?.copyWith(color: cs.secondary)),
+            ]),
+            const SizedBox(height: 8),
             Card(
-              color: cs.primaryContainer,
+              color: cs.secondaryContainer,
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(_rslResult,
-                          style: Theme.of(context)
-                              .textTheme
-                              .titleMedium
-                              ?.copyWith(color: cs.onPrimaryContainer)),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.volume_up_outlined),
-                      tooltip: 'Воспроизвести',
-                      onPressed: () => _playAudio(_rslAudio),
-                    ),
-                  ],
+                child: Text(
+                  _glossSequence,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontFamily: 'monospace',
+                        letterSpacing: 1.5,
+                        color: cs.onSecondaryContainer,
+                      ),
                 ),
               ),
             ),
+          ],
         ],
       ),
     );
   }
 
-  // ── Right column: Text → RSL ────────────────────────────────────────── //
+  // ── Правая панель — слышащий ──────────────────────────────────────────────── //
 
-  Widget _rightColumn(ColorScheme cs) {
-    return Padding(
+  Widget _hearingPanel(ColorScheme cs) {
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Речь → Жест',
-              style: Theme.of(context).textTheme.titleLarge),
+          // Title
+          Row(children: [
+            Icon(Icons.hearing, size: 18, color: cs.tertiary),
+            const SizedBox(width: 6),
+            Text('Читаю жесты',
+                style: Theme.of(context).textTheme.titleMedium),
+          ]),
           const SizedBox(height: 12),
 
-          // Text input
+          // Recognized gesture text — main output for hearing person
+          _rslResult.isNotEmpty
+              ? Card(
+                  color: cs.primaryContainer,
+                  elevation: 2,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _rslResult,
+                            style: Theme.of(context)
+                                .textTheme
+                                .headlineSmall
+                                ?.copyWith(color: cs.onPrimaryContainer),
+                          ),
+                        ),
+                        if (_rslAudio.isNotEmpty)
+                          IconButton(
+                            icon: const Icon(Icons.volume_up_outlined),
+                            tooltip: 'Озвучить',
+                            onPressed: () => _playAudio(_rslAudio),
+                          ),
+                      ],
+                    ),
+                  ),
+                )
+              : Card(
+                  color: cs.surfaceContainerLow,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Row(children: [
+                      Icon(Icons.sign_language,
+                          color: cs.outline, size: 28),
+                      const SizedBox(width: 12),
+                      Text('Жесты появятся здесь',
+                          style:
+                              TextStyle(color: cs.onSurfaceVariant)),
+                    ]),
+                  ),
+                ),
+
+          const SizedBox(height: 24),
+          const Divider(),
+          const SizedBox(height: 12),
+
+          // Text reply input
+          Row(children: [
+            Icon(Icons.edit_outlined, size: 15, color: cs.tertiary),
+            const SizedBox(width: 6),
+            Text('Написать ответ',
+                style: Theme.of(context)
+                    .textTheme
+                    .labelMedium
+                    ?.copyWith(color: cs.tertiary)),
+          ]),
+          const SizedBox(height: 8),
+
           TextField(
             controller: _textCtrl,
-            maxLines: 4,
+            maxLines: 3,
             decoration: const InputDecoration(
               border: OutlineInputBorder(),
-              labelText: 'Введите текст',
-              hintText: 'Пример: Я хочу пить воду',
+              hintText: 'Введите текст на русском…',
             ),
-            onSubmitted: (_) => _translateText(),
+            onSubmitted: (_) => _sendText(),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
 
           FilledButton.icon(
-            onPressed: _ttsProcessing ? null : _translateText,
-            icon: const Icon(Icons.translate),
-            label: const Text('Перевести в глоссы РЖЯ'),
-          ),
-
-          const SizedBox(height: 16),
-
-          // Processing indicator
-          if (_ttsProcessing)
-            const Center(child: CircularProgressIndicator()),
-
-          // ASR text (for voice input pathway)
-          if (_asrText.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            _InfoCard(
-              icon: Icons.hearing,
-              label: 'Распознанный текст',
-              text: _asrText,
-              color: cs.secondaryContainer,
-            ),
-          ],
-
-          // Gloss sequence output
-          if (_glossSequence.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            _InfoCard(
-              icon: Icons.sign_language,
-              label: 'Глоссы РЖЯ',
-              text: _glossSequence,
-              color: cs.primaryContainer,
-              monospace: true,
-            ),
-          ],
-
-          const Spacer(),
-
-          // About note
-          Text(
-            'Glossa — система перевода русского жестового языка',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: cs.onSurfaceVariant,
-                ),
-            textAlign: TextAlign.center,
+            onPressed: _ttsProcessing ? null : _sendText,
+            icon: _ttsProcessing
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.send),
+            label: const Text('Отправить'),
           ),
         ],
       ),
@@ -522,14 +485,12 @@ class _HomePageState extends State<HomePage> {
     _stopCamera();
     _rslSub?.cancel();
     _rslWs?.sink.close();
-    _ttsSub?.cancel();
-    _ttsWs?.sink.close();
     _textCtrl.dispose();
     super.dispose();
   }
 }
 
-// ── Supporting widgets ────────────────────────────────────────────────────── //
+// ── Supporting widgets ────────────────────────────────────────────────────────── //
 
 class _WebCameraPreview extends StatelessWidget {
   final web.HTMLVideoElement videoElement;
@@ -552,128 +513,9 @@ class _WebCameraPreview extends StatelessWidget {
   }
 }
 
-class _WebGlossRow extends StatelessWidget {
-  final _GlossItem item;
-  final int rank;
-  final ColorScheme cs;
-
-  const _WebGlossRow({
-    required this.item,
-    required this.rank,
-    required this.cs,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final pct = (item.prob * 100).toStringAsFixed(1);
-    final isTop = rank == 1;
-
-    return Card(
-      elevation: isTop ? 3 : 0,
-      color: isTop ? cs.primaryContainer : cs.surfaceContainerLow,
-      margin: const EdgeInsets.symmetric(vertical: 3),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          children: [
-            CircleAvatar(
-              radius: 12,
-              backgroundColor: isTop ? cs.primary : cs.outlineVariant,
-              child: Text('$rank',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: isTop ? cs.onPrimary : cs.onSurface,
-                  )),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(item.gloss,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontWeight: isTop ? FontWeight.bold : FontWeight.normal,
-                          )),
-                  const SizedBox(height: 3),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(
-                      value: item.prob,
-                      minHeight: 6,
-                      color: item.prob >= 0.7
-                          ? Colors.green
-                          : item.prob >= 0.4
-                              ? cs.secondary
-                              : cs.error,
-                      backgroundColor: cs.surfaceContainerHighest,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            Text('$pct%',
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: cs.onSurfaceVariant,
-                    )),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _InfoCard extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String text;
-  final Color color;
-  final bool monospace;
-
-  const _InfoCard({
-    required this.icon,
-    required this.label,
-    required this.text,
-    required this.color,
-    this.monospace = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: color,
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Icon(icon, size: 16),
-              const SizedBox(width: 6),
-              Text(label, style: Theme.of(context).textTheme.labelMedium),
-            ]),
-            const SizedBox(height: 8),
-            Text(
-              text,
-              style: monospace
-                  ? Theme.of(context)
-                      .textTheme
-                      .bodyLarge
-                      ?.copyWith(fontFamily: 'monospace', letterSpacing: 1.1)
-                  : Theme.of(context).textTheme.bodyLarge,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _StatusDot extends StatelessWidget {
   final _WsStatus status;
-  final String label;
-  const _StatusDot({required this.status, required this.label});
+  const _StatusDot({required this.status});
 
   @override
   Widget build(BuildContext context) {
@@ -684,7 +526,7 @@ class _StatusDot extends StatelessWidget {
       _WsStatus.disconnected => Colors.grey,
     };
     return Tooltip(
-      message: '$label: ${status.name}',
+      message: 'WS: ${status.name}',
       child: Container(
         width: 10,
         height: 10,
@@ -695,22 +537,21 @@ class _StatusDot extends StatelessWidget {
 }
 
 class _LatencyChip extends StatelessWidget {
-  final int? ms;
-  const _LatencyChip({this.ms});
+  final int ms;
+  const _LatencyChip({required this.ms});
 
   @override
   Widget build(BuildContext context) {
-    if (ms == null) return const SizedBox.shrink();
-    final color = ms! <= 500
+    final color = ms <= 500
         ? Colors.green
-        : ms! <= 2000
+        : ms <= 2000
             ? Colors.orange
             : Colors.red;
     return Chip(
       label: Text('${ms}ms',
           style: TextStyle(color: color, fontSize: 11)),
-      side: BorderSide(color: color.withValues(alpha: 0.5)),
-      backgroundColor: color.withValues(alpha: 0.1),
+      side: BorderSide(color: color.withValues(alpha: 0.4)),
+      backgroundColor: color.withValues(alpha: 0.08),
       padding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
     );
