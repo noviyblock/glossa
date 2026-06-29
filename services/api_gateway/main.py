@@ -5,10 +5,11 @@ import logging
 import time
 import uuid
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import httpx
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 import redis.asyncio as aioredis
 
 from config import HTTP_TIMEOUT, REDIS_URL
@@ -51,6 +52,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Prometheus metrics ───────────────────────────────────────────────────── #
+
+_SERVICE_NAME = "api-gateway"
+
+REQUEST_COUNT = Counter(
+    "glossa_requests_total", "Total number of requests processed",
+    ["service", "endpoint", "status_code"],
+)
+REQUEST_LATENCY = Histogram(
+    "glossa_request_latency_seconds", "Request latency in seconds",
+    ["service", "endpoint"],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+)
+TRANSLATION_LATENCY = Histogram(
+    "glossa_translation_latency_seconds", "End-to-end translation latency",
+    ["mode", "domain"],
+    buckets=[0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0],
+)
+ACTIVE_WEBSOCKETS = Gauge(
+    "glossa_active_websocket_connections", "Number of active WebSocket connections",
+    ["service"],
+)
+
+
+@app.middleware("http")
+async def _prometheus_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    REQUEST_COUNT.labels(service=_SERVICE_NAME, endpoint=request.url.path, status_code=response.status_code).inc()
+    REQUEST_LATENCY.labels(service=_SERVICE_NAME, endpoint=request.url.path).observe(duration)
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 
 # ── Health ─────────────────────────────────────────────────────────────────── #
 
@@ -85,6 +124,7 @@ async def translate(req: TranslateRequest):
     text_to_rsl: supply text (Russian) → returns gloss sequence + base64 WAV
     """
     session_id = req.session_id or str(uuid.uuid4())
+    _t0 = time.perf_counter()
     try:
         result = await _orchestrator.translate_sync(
             req.mode,
@@ -92,6 +132,7 @@ async def translate(req: TranslateRequest):
             text=req.text,
             session_id=session_id,
         )
+        TRANSLATION_LATENCY.labels(mode=req.mode, domain="general").observe(time.perf_counter() - _t0)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     except RuntimeError as exc:
@@ -142,6 +183,7 @@ async def ws_translate(ws: WebSocket, mode: str):
         return
 
     await ws.accept()
+    ACTIVE_WEBSOCKETS.labels(service=_SERVICE_NAME).inc()
     session_id: str | None = None
 
     async def _send(msg_type: str, payload: dict) -> None:
@@ -232,5 +274,6 @@ async def ws_translate(ws: WebSocket, mode: str):
         with contextlib.suppress(Exception):
             await _send("error", {"message": "internal server error"})
     finally:
+        ACTIVE_WEBSOCKETS.labels(service=_SERVICE_NAME).dec()
         if session_id:
             _sessions.unregister(session_id)

@@ -17,6 +17,7 @@ dependencies = [
     # 4-bit quantization_config in its config.json — transformers requires bitsandbytes
     # to be importable to load it, even though the weights were meant to be merged/dequantized.
     "bitsandbytes>=0.46.1",
+    "prometheus-client>=0.20",
 ]
 
 [tool.hatch.build.targets.wheel]

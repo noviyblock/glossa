@@ -3,13 +3,21 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 
 import torch
+from prometheus_client import Histogram
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from config import DEVICE_MAP, MAX_NEW_TOKENS, MODEL_PATH
 
 logger = logging.getLogger(__name__)
+
+MODEL_INFERENCE_LATENCY = Histogram(
+    "glossa_model_inference_latency_seconds", "Model inference latency per service",
+    ["service", "model"],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5],
+)
 
 SYSTEM_PROMPT = (
     "Ты — переводчик русского жестового языка (РЖЯ). \n"
@@ -86,6 +94,7 @@ class Translator:
         inputs = self._tokenizer(text, return_tensors="pt").to(self._model.device)
         input_len = inputs["input_ids"].shape[-1]
 
+        start = time.perf_counter()
         with torch.no_grad():
             outputs = self._model.generate(
                 **inputs,
@@ -93,6 +102,7 @@ class Translator:
                 do_sample=False,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
+        MODEL_INFERENCE_LATENCY.labels(service="nlp-service", model="qwen2-1.5b").observe(time.perf_counter() - start)
 
         new_tokens = outputs[0][input_len:]
         result = self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
