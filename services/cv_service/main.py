@@ -29,6 +29,7 @@ _normalizer: Normalizer         | None = None
 _classifier: GestureClassifier  | None = None
 _redis:      aioredis.Redis     | None = None
 _ready = False
+_session_buffers: dict[str, SlidingWindowBuffer] = {}
 
 
 @asynccontextmanager
@@ -120,14 +121,19 @@ async def process_frame(body: dict[str, Any]):
     if frame is None:
         return JSONResponse(status_code=400, content={"error": "cannot decode image"})
 
+    session_id = body.get("session_id", "")
     kp = await asyncio.to_thread(_extractor.extract, frame)
 
-    # Build a dummy full window by repeating the single frame
-    window = np.stack([kp] * cfg.WINDOW_SIZE, axis=0)
-    window = _normalizer(window)
-    results = await asyncio.to_thread(_classifier.predict_top3, window)
+    buf = _session_buffers.setdefault(session_id, SlidingWindowBuffer())
+    window = buf.push(kp)
+    if window is None:
+        return {"session_id": session_id, "glosses": []}
 
-    return {"session_id": body.get("session_id", ""), "glosses": results}
+    norm_win = _normalizer(window)
+    results = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+    buf.on_result(results[0]["gloss"], results[0]["prob"])
+
+    return {"session_id": session_id, "glosses": results}
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────── #

@@ -1,8 +1,13 @@
 /// Central configuration for the Glossa web client.
 class Config {
   // Override via URL parameter ?server=ws://host:8000 or env at build time.
-  static String serverUrl =
-      const String.fromEnvironment('SERVER_URL', defaultValue: 'ws://localhost:8000');
+  static String serverUrl = _resolveServerUrl();
+
+  static String _resolveServerUrl() {
+    final fromQuery = Uri.base.queryParameters['server'];
+    if (fromQuery != null && fromQuery.isNotEmpty) return fromQuery;
+    return const String.fromEnvironment('SERVER_URL', defaultValue: 'ws://localhost:8000');
+  }
 
   static String get wsRslToText =>
       '$serverUrl/api/v1/ws/translate/rsl_to_text';
