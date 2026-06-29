@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
@@ -276,7 +277,7 @@ class _TextToRslScreenState extends State<TextToRslScreen> {
                     boxShadow: _isRecording
                         ? [
                             BoxShadow(
-                                color: cs.error.withOpacity(0.4),
+                                color: cs.error.withValues(alpha: 0.4),
                                 blurRadius: 20,
                                 spreadRadius: 4)
                           ]

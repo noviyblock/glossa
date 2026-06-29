@@ -4,7 +4,6 @@ import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 
 class CameraService {
   CameraController? _controller;
@@ -68,8 +67,6 @@ class CameraService {
 
   Future<String?> _captureFrame() async {
     if (_controller == null || !_controller!.value.isInitialized) return null;
-    final dir  = await getTemporaryDirectory();
-    final path = '${dir.path}/glossa_frame_${DateTime.now().millisecondsSinceEpoch}.jpg';
     final file = await _controller!.takePicture();
     final bytes = await file.readAsBytes();
     // Clean up temp file

@@ -61,7 +61,7 @@ class HomeScreen extends StatelessWidget {
                     Text(
                       'Перевод русского жестового языка',
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: cs.onPrimaryContainer.withOpacity(0.8),
+                            color: cs.onPrimaryContainer.withValues(alpha: 0.8),
                           ),
                       textAlign: TextAlign.center,
                     ),
@@ -187,8 +187,8 @@ class _StatusChip extends StatelessWidget {
     return Chip(
       avatar: Icon(icon, size: 16, color: color),
       label: Text(label, style: TextStyle(color: color, fontSize: 12)),
-      backgroundColor: color.withOpacity(0.1),
-      side: BorderSide(color: color.withOpacity(0.4)),
+      backgroundColor: color.withValues(alpha: 0.1),
+      side: BorderSide(color: color.withValues(alpha: 0.4)),
     );
   }
 }

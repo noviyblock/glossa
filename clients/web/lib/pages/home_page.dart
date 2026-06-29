@@ -2,7 +2,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -706,8 +705,8 @@ class _LatencyChip extends StatelessWidget {
     return Chip(
       label: Text('${ms}ms',
           style: TextStyle(color: color, fontSize: 11)),
-      side: BorderSide(color: color.withOpacity(0.5)),
-      backgroundColor: color.withOpacity(0.1),
+      side: BorderSide(color: color.withValues(alpha: 0.5)),
+      backgroundColor: color.withValues(alpha: 0.1),
       padding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
     );
