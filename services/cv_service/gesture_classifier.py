@@ -85,7 +85,8 @@ class GestureClassifier:
             logits = self._session.run(None, {input_name: inp})[0]  # (1, num_classes)
         MODEL_INFERENCE_LATENCY.labels(service="cv-service", model=self._backend).observe(time.perf_counter() - start)
 
-        probs = self._softmax(logits[0])
+        logits0 = np.nan_to_num(logits[0], nan=0.0, posinf=1e4, neginf=-1e4)
+        probs = self._softmax(logits0)
         top_idx = np.argsort(probs)[::-1][:TOP_K]
         return [
             GlossResult(gloss=self._idx_to_class.get(int(i), str(i)), prob=float(probs[i]))
