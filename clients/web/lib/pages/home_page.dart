@@ -55,6 +55,8 @@ class _HomePageState extends State<HomePage> {
   DateTime? _lastFrameSent;
   // Prevents frame queue buildup: only one frame in-flight at a time
   bool _waitingForResponse = false;
+  // Gesture segmentation: hold button while signing
+  bool _gesturing = false;
 
   // Skeleton overlay — two-buffer animation
   List<List<double>>? _targetKp;  // latest from server
@@ -155,6 +157,18 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ── RSL WS ───────────────────────────────────────────────────────────────── //
+
+  void _onGestureStart() {
+    if (_rslStatus != _WsStatus.connected) return;
+    setState(() => _gesturing = true);
+    _rslWs!.sink.add(jsonEncode({'type': 'gesture_start', 'session_id': _sessionId}));
+  }
+
+  void _onGestureEnd() {
+    if (!_gesturing || _rslStatus != _WsStatus.connected) return;
+    setState(() => _gesturing = false);
+    _rslWs!.sink.add(jsonEncode({'type': 'gesture_end', 'session_id': _sessionId}));
+  }
 
   Future<void> _connectRslWs() async {
     setState(() => _rslStatus = _WsStatus.connecting);
@@ -422,25 +436,67 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
 
-        // ── Camera button (bottom) ────────────────────────────────────────── //
+        // ── Camera + gesture buttons (bottom) ────────────────────────────── //
         Positioned(
           bottom: 8, left: 0, right: 0,
           child: Center(
-            child: FilledButton.icon(
-              onPressed: _cameraActive ? _stopCamera : _startCamera,
-              icon: Icon(_cameraActive ? Icons.stop : Icons.videocam, size: 16),
-              label: Text(_cameraActive ? 'Стоп' : 'Камера',
-                  style: const TextStyle(fontSize: 13)),
-              style: FilledButton.styleFrom(
-                backgroundColor: _cameraActive
-                    ? cs.error.withValues(alpha: 0.9)
-                    : cs.primary.withValues(alpha: 0.9),
-                foregroundColor: _cameraActive ? cs.onError : cs.onPrimary,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              // Toggle camera
+              FilledButton.icon(
+                onPressed: _cameraActive ? _stopCamera : _startCamera,
+                icon: Icon(_cameraActive ? Icons.stop : Icons.videocam, size: 16),
+                label: Text(_cameraActive ? 'Стоп' : 'Камера',
+                    style: const TextStyle(fontSize: 13)),
+                style: FilledButton.styleFrom(
+                  backgroundColor: _cameraActive
+                      ? cs.error.withValues(alpha: 0.9)
+                      : cs.primary.withValues(alpha: 0.9),
+                  foregroundColor: _cameraActive ? cs.onError : cs.onPrimary,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
               ),
-            ),
+              if (_cameraActive) ...[
+                const SizedBox(width: 8),
+                // Hold to sign button: press=start recording, release=translate
+                GestureDetector(
+                  onTapDown: (_) => _onGestureStart(),
+                  onTapUp: (_) => _onGestureEnd(),
+                  onTapCancel: _onGestureEnd,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _gesturing
+                          ? Colors.redAccent.withValues(alpha: 0.92)
+                          : Colors.white.withValues(alpha: 0.85),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: _gesturing ? Colors.redAccent : cs.outline,
+                        width: _gesturing ? 2 : 1,
+                      ),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(
+                        _gesturing ? Icons.fiber_manual_record : Icons.pan_tool_outlined,
+                        size: 14,
+                        color: _gesturing ? Colors.white : cs.onSurface,
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        _gesturing ? 'Идёт запись…' : 'Держи — жест',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: _gesturing ? Colors.white : cs.onSurface,
+                        ),
+                      ),
+                    ]),
+                  ),
+                ),
+              ],
+            ]),
           ),
         ),
       ],

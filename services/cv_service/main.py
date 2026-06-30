@@ -153,6 +153,37 @@ async def process_frame(body: dict[str, Any]):
             "keypoints": kp_list, "person_detected": person_detected}
 
 
+@app.post("/reset_buffer")
+async def reset_buffer(body: dict[str, Any]):
+    """Clear the sliding window buffer for a session (gesture_start signal)."""
+    session_id = body.get("session_id", "")
+    if session_id in _session_buffers:
+        _session_buffers[session_id]._reset()
+    _extractor.reset_tracking()
+    return {"status": "ok", "session_id": session_id}
+
+
+@app.post("/flush_buffer")
+async def flush_buffer(body: dict[str, Any]):
+    """Force-classify current buffer contents regardless of stride/size."""
+    session_id = body.get("session_id", "")
+    buf = _session_buffers.get(session_id)
+    if buf is None or len(buf._buf) < 3:
+        return {"session_id": session_id, "glosses": []}
+
+    from sliding_window import _resample_to
+    window = np.stack(list(buf._buf), axis=0)
+    if len(buf._buf) < buf._window_size:
+        window = _resample_to(window, buf._window_size)
+
+    norm_win = _normalizer(window)
+    results = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+    buf._reset()
+    logger.info("flush session=%s top1=%s conf=%.2f", session_id[:8],
+                results[0]["gloss"], results[0]["prob"])
+    return {"session_id": session_id, "glosses": results}
+
+
 # ── WebSocket endpoint ────────────────────────────────────────────────────── #
 
 @app.websocket("/ws")

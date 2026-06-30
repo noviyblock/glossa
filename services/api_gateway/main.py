@@ -266,6 +266,30 @@ async def ws_translate(ws: WebSocket, mode: str):
                     await _orchestrator.delete_session(session_id)
                 break
 
+            # ── Gesture segmentation ──────────────────────────────────── #
+            elif msg_type == "gesture_start" and mode == "rsl_to_text":
+                # Client pressed "show gesture" button — clear sliding window
+                await _orchestrator.reset_gesture_buffer(session_id)
+                await _send("gesture_ack", {"status": "started"})
+
+            elif msg_type == "gesture_end" and mode == "rsl_to_text":
+                # Client released button — force classify whatever is in buffer
+                try:
+                    result = await _orchestrator.flush_gesture_buffer(session_id)
+                except RuntimeError as exc:
+                    await _send("error", {"message": str(exc)})
+                    continue
+                if result:
+                    await _send("gloss", {
+                        "glosses": result["glosses"],
+                        "confidence": result["confidence"],
+                        "keypoints": None,
+                        "person_detected": False,
+                    })
+                    if result.get("translation"):
+                        await _send("result", {"text": result["translation"],
+                                               "confidence": result["confidence"]})
+
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong", "session_id": session_id or ""})
 
