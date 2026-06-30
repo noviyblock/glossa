@@ -139,13 +139,12 @@ services:
     <<: *svc
     environment:
       ASR_SERVICE_PORT: "8002"
-      WHISPER_MODEL: base
-      DEVICE: cpu
-      COMPUTE_TYPE: int8
+      ASR_WHISPER_MODEL: base
+      ASR_DEVICE: cpu
+      ASR_COMPUTE_TYPE: int8
       LANGUAGE: ru
-      BEAM_SIZE: "5"
-      VAD_FILTER: "true"
-      # cache dir inside the models volume
+      ASR_BEAM_SIZE: "5"
+      ASR_VAD_FILTER: "true"
       WHISPER_CACHE_DIR: /models/whisper_cache
     volumes:
       - ./models:/models:ro
