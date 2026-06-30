@@ -53,6 +53,8 @@ class _HomePageState extends State<HomePage> {
   String _rslAudio = '';
   int? _latencyMs;
   DateTime? _lastFrameSent;
+  // Prevents frame queue buildup: only one frame in-flight at a time
+  bool _waitingForResponse = false;
 
   // Skeleton overlay
   List<List<double>>? _keypoints; // (75, 3) normalized [x, y, score]
@@ -111,12 +113,15 @@ class _HomePageState extends State<HomePage> {
 
   void _sendFrame() {
     if (_video == null || _canvas == null || _rslStatus != _WsStatus.connected) return;
+    // Drop frame if previous one is still being processed (prevents queue buildup → latency spike)
+    if (_waitingForResponse) return;
     final ctx = _canvas!.getContext('2d') as web.CanvasRenderingContext2D?;
     if (ctx == null) return;
     // Draw scaled to canvas size so the full frame is captured (not just top-left crop)
     ctx.drawImage(_video!, 0, 0, _canvas!.width, _canvas!.height);
     final b64 = _canvas!.toDataURL('image/jpeg', 0.85.toJS).split(',').last;
     _lastFrameSent = DateTime.now();
+    _waitingForResponse = true;
     _rslWs!.sink.add(jsonEncode({'type': 'video_frame', 'frame': b64, 'session_id': _sessionId}));
   }
 
@@ -169,6 +174,7 @@ class _HomePageState extends State<HomePage> {
         }
 
         setState(() {
+          _waitingForResponse = false; // Unblock next frame
           _liveGlosses = items;
           _keypoints = kp;
           _personDetected = payload['person_detected'] as bool? ?? false;
@@ -521,12 +527,19 @@ class _SkeletonPainter extends CustomPainter {
     [0, 17], [17, 18], [18, 19], [19, 20],// pinky
   ];
 
+  // Minimum confidence to draw a keypoint. SimCC scores are soft-max peaks —
+  // valid joints usually score >0.3; noise/occluded joints score near 0.
+  static const _minScore = 0.3;
+
   Offset? _kpOffset(int idx, Size size) {
     if (idx >= keypoints.length) return null;
     final kp = keypoints[idx];
-    // Skip joints that have both x and y exactly 0 (not detected)
     if (kp[0] == 0.0 && kp[1] == 0.0) return null;
-    return Offset(kp[0] * size.width, kp[1] * size.height);
+    if (kp[2] < _minScore) return null; // skip low-confidence joints
+    // Clamp to [0,1] to guard against occasional out-of-crop coordinates
+    final x = kp[0].clamp(0.0, 1.0);
+    final y = kp[1].clamp(0.0, 1.0);
+    return Offset(x * size.width, y * size.height);
   }
 
   void _drawEdges(Canvas c, Size s, List<List<int>> edges, int offset, Paint linePaint) {
@@ -548,10 +561,11 @@ class _SkeletonPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (!personDetected || keypoints.isEmpty) return;
 
-    // ── Bounding box from valid keypoints ────────────────────────────────── //
+    // ── Bounding box from confident keypoints only ────────────────────────── //
     final valid = [
       for (int i = 0; i < keypoints.length; i++)
-        if (keypoints[i][0] != 0.0 || keypoints[i][1] != 0.0) keypoints[i]
+        if (keypoints[i][2] >= _minScore &&
+            (keypoints[i][0] != 0.0 || keypoints[i][1] != 0.0)) keypoints[i]
     ];
     if (valid.isNotEmpty) {
       final xs = valid.map((k) => k[0] * size.width).toList();
