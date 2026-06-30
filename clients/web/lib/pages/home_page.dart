@@ -84,7 +84,9 @@ class _HomePageState extends State<HomePage> {
         ..srcObject = stream
         ..autoplay = true
         ..muted = true;
-      _canvas = web.HTMLCanvasElement()..width = 320..height = 240;
+      // Off-screen video must be explicitly played in some browsers
+      try { await _video!.play().toDart; } catch (_) {}
+      _canvas = web.HTMLCanvasElement()..width = 640..height = 480;
       if (mounted) setState(() => _cameraActive = true);
       await _connectRslWs();
       _frameTimer = Timer.periodic(const Duration(milliseconds: 100), (_) => _sendFrame());
@@ -111,8 +113,9 @@ class _HomePageState extends State<HomePage> {
     if (_video == null || _canvas == null || _rslStatus != _WsStatus.connected) return;
     final ctx = _canvas!.getContext('2d') as web.CanvasRenderingContext2D?;
     if (ctx == null) return;
-    ctx.drawImage(_video!, 0, 0);
-    final b64 = _canvas!.toDataURL('image/jpeg', 0.7.toJS).split(',').last;
+    // Draw scaled to canvas size so the full frame is captured (not just top-left crop)
+    ctx.drawImage(_video!, 0, 0, _canvas!.width, _canvas!.height);
+    final b64 = _canvas!.toDataURL('image/jpeg', 0.85.toJS).split(',').last;
     _lastFrameSent = DateTime.now();
     _rslWs!.sink.add(jsonEncode({'type': 'video_frame', 'frame': b64, 'session_id': _sessionId}));
   }

@@ -107,7 +107,7 @@ services:
       # Keypoint extraction (DWPose: YOLOX detector + RTMPose body+hand)
       DWPOSE_DET_PATH: /models/dwpose/yolox_l.onnx
       DWPOSE_POSE_PATH: /models/dwpose/dw-ll_ucoco_384.onnx
-      DWPOSE_DET_CONF: "0.5"
+      DWPOSE_DET_CONF: "0.25"
       DWPOSE_DET_NMS: "0.45"
       # Normalisation
       NORM_STATS_PATH: /models/norm_stats.npz

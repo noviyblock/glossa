@@ -122,12 +122,21 @@ async def process_frame(body: dict[str, Any]):
         return JSONResponse(status_code=400, content={"error": "cannot decode image"})
 
     session_id = body.get("session_id", "")
+    h, w = frame.shape[:2]
     kp = await asyncio.to_thread(_extractor.extract, frame)
 
     person_detected = bool(np.any(kp != 0))
     kp_list = kp.tolist()  # (75, 3) – sent to client for skeleton overlay
 
     buf = _session_buffers.setdefault(session_id, SlidingWindowBuffer())
+    # Periodic diagnostic log (every 30 frames)
+    buf_len = len(buf._buf)
+    if buf_len % 30 == 0:
+        nonzero = int(np.count_nonzero(kp[:, 0]))
+        logger.info(
+            "DIAG session=%s buf=%d size=%dx%d person=%s nonzero_kp=%d/75",
+            session_id[:8], buf_len, w, h, person_detected, nonzero,
+        )
     window = buf.push(kp)
 
     if window is None:
