@@ -107,6 +107,7 @@ services:
       # Keypoint extraction — rtmlib (RTMDet-nano + RTMW)
       RTMLIB_MODE: lightweight
       RTMLIB_DEVICE: cpu
+      TORCH_HOME: /home/glossa/.rtmlib
       # Normalisation
       NORM_STATS_PATH: /models/norm_stats.npz
       CLASS_MAP_PATH: /data/idx_to_class.json
@@ -122,7 +123,7 @@ services:
     volumes:
       - ./models:/models:ro
       - ./data:/data:ro
-      - rtmlib-models:/home/glossa/.rtmlib
+      - ./rtmlib_cache:/home/glossa/.rtmlib
     depends_on:
       redis:
         condition: service_healthy
@@ -254,4 +255,3 @@ volumes:
   prometheus-data:
   grafana-data:
   torch-cache:
-  rtmlib-models:

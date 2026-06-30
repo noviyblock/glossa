@@ -1,6 +1,9 @@
 # Diploma text (local only)
 diploma_text.txt
 
+# rtmlib model cache (downloaded at runtime on VM)
+rtmlib_cache/
+
 # Python
 __pycache__/
 *.py[cod]
