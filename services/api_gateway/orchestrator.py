@@ -104,6 +104,8 @@ class Orchestrator:
 
         glosses: list[dict] = cv_data.get("glosses", [])
         confidence = glosses[0]["prob"] if glosses else 0.0
+        keypoints: list | None = cv_data.get("keypoints")
+        person_detected: bool = cv_data.get("person_detected", False)
 
         # Publish to cv:results stream for external consumers
         await self._redis.xadd(
@@ -146,7 +148,8 @@ class Orchestrator:
             "last_glosses": glosses, "latency_ms": latency_ms,
         })
 
-        return {"glosses": glosses, "translation": translation, "confidence": confidence}
+        return {"glosses": glosses, "translation": translation, "confidence": confidence,
+                "keypoints": keypoints, "person_detected": person_detected}
 
     # ── Pipeline: Text → RSL ──────────────────────────────────────────────── #
 

@@ -214,8 +214,13 @@ async def ws_translate(ws: WebSocket, mode: str):
                 glosses    = result["glosses"]
                 confidence = result["confidence"]
 
-                # 1. Send gloss results immediately
-                await _send("gloss", {"glosses": glosses, "confidence": confidence})
+                # 1. Send gloss results immediately (+ keypoints for skeleton overlay)
+                await _send("gloss", {
+                    "glosses": glosses,
+                    "confidence": confidence,
+                    "keypoints": result.get("keypoints"),
+                    "person_detected": result.get("person_detected", False),
+                })
 
                 # 2. Send text translation as partial + final
                 translation = result["translation"]
