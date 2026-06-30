@@ -113,9 +113,10 @@ services:
       NORM_STATS_PATH: /models/norm_stats.npz
       CLASS_MAP_PATH: /data/idx_to_class.json
       NUM_CLASSES: "200"
-      # Sliding window
+      # Sliding window — model input is 32 frames, early emit after 10
       WINDOW_SIZE: "32"
-      WINDOW_STRIDE: "30"
+      WINDOW_STRIDE: "5"
+      EARLY_EMIT: "10"
       CONF_THRESHOLD: "0.7"
       # Runtime
       CV_SERVICE_PORT: "8001"

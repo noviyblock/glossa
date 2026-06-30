@@ -56,9 +56,12 @@ class _HomePageState extends State<HomePage> {
   // Prevents frame queue buildup: only one frame in-flight at a time
   bool _waitingForResponse = false;
 
-  // Skeleton overlay
-  List<List<double>>? _keypoints; // (75, 3) normalized [x, y, score]
-  bool _personDetected = false;
+  // Skeleton overlay — two-buffer animation
+  List<List<double>>? _targetKp;  // latest from server
+  List<List<double>>? _displayKp; // currently rendered (EMA toward target)
+  bool _showSkeleton = false;
+  Timer? _animTimer;          // 30fps render tick
+  Timer? _hideSkeletonTimer;  // 500ms holdout before hiding skeleton
 
   // RSL recognition chat (panel 3)
   final List<_Msg> _rslMsgs = [];
@@ -92,6 +95,8 @@ class _HomePageState extends State<HomePage> {
       if (mounted) setState(() => _cameraActive = true);
       await _connectRslWs();
       _frameTimer = Timer.periodic(const Duration(milliseconds: 100), (_) => _sendFrame());
+      // 30fps animation tick: smoothly interpolate skeleton toward latest keypoints
+      _animTimer = Timer.periodic(const Duration(milliseconds: 33), _animateSkeleton);
     } catch (e) {
       if (mounted) setState(() => _cameraError = '$e');
     }
@@ -100,15 +105,39 @@ class _HomePageState extends State<HomePage> {
   void _stopCamera() {
     _frameTimer?.cancel();
     _frameTimer = null;
+    _animTimer?.cancel();
+    _animTimer = null;
+    _hideSkeletonTimer?.cancel();
+    _hideSkeletonTimer = null;
     _mediaStream?.getTracks().toDart.forEach((t) => t.stop());
     _mediaStream = null;
     _disconnectRslWs();
     if (mounted) setState(() {
       _cameraActive = false;
       _liveGlosses = [];
-      _keypoints = null;
-      _personDetected = false;
+      _targetKp = null;
+      _displayKp = null;
+      _showSkeleton = false;
     });
+  }
+
+  void _animateSkeleton(Timer _) {
+    if (!mounted || _targetKp == null) return;
+    const alpha = 0.35; // EMA factor: higher = snappier, lower = smoother
+    if (_displayKp == null || _displayKp!.length != _targetKp!.length) {
+      // First frame: snap to target immediately
+      setState(() => _displayKp = _targetKp!.map((k) => List<double>.from(k)).toList());
+      return;
+    }
+    final next = <List<double>>[];
+    for (int i = 0; i < _targetKp!.length; i++) {
+      next.add([
+        _displayKp![i][0] * (1 - alpha) + _targetKp![i][0] * alpha,
+        _displayKp![i][1] * (1 - alpha) + _targetKp![i][1] * alpha,
+        _targetKp![i][2], // confidence: use target directly
+      ]);
+    }
+    setState(() => _displayKp = next);
   }
 
   void _sendFrame() {
@@ -173,11 +202,23 @@ class _HomePageState extends State<HomePage> {
           }).toList();
         }
 
+        final personDetected = payload['person_detected'] as bool? ?? false;
+        // Skeleton holdout: keep showing 500ms after person disappears (avoids flicker)
+        if (personDetected) {
+          _hideSkeletonTimer?.cancel();
+          _hideSkeletonTimer = null;
+          _showSkeleton = true;
+          if (kp != null) _targetKp = kp;
+        } else if (_showSkeleton && _hideSkeletonTimer == null) {
+          _hideSkeletonTimer = Timer(const Duration(milliseconds: 500), () {
+            if (mounted) setState(() { _showSkeleton = false; _targetKp = null; _displayKp = null; });
+            _hideSkeletonTimer = null;
+          });
+        }
+
         setState(() {
           _waitingForResponse = false; // Unblock next frame
           _liveGlosses = items;
-          _keypoints = kp;
-          _personDetected = payload['person_detected'] as bool? ?? false;
           if (_lastFrameSent != null) {
             _latencyMs = DateTime.now().difference(_lastFrameSent!).inMilliseconds;
           }
@@ -346,12 +387,12 @@ class _HomePageState extends State<HomePage> {
                 ),
         ),
 
-        // ── Skeleton overlay ─────────────────────────────────────────────── //
-        if (_cameraActive && _keypoints != null)
+        // ── Skeleton overlay (animated at 30fps via _animTimer) ──────────── //
+        if (_cameraActive && _showSkeleton && _displayKp != null)
           CustomPaint(
             painter: _SkeletonPainter(
-              keypoints: _keypoints!,
-              personDetected: _personDetected,
+              keypoints: _displayKp!,
+              personDetected: _showSkeleton,
             ),
           ),
 
@@ -493,6 +534,8 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _stopCamera();
+    _animTimer?.cancel();
+    _hideSkeletonTimer?.cancel();
     _rslSub?.cancel();
     _rslWs?.sink.close();
     _textCtrl.dispose();
