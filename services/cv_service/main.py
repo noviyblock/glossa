@@ -124,16 +124,101 @@ async def process_frame(body: dict[str, Any]):
     session_id = body.get("session_id", "")
     kp = await asyncio.to_thread(_extractor.extract, frame)
 
+    person_detected = bool(np.any(kp != 0))
+
     buf = _session_buffers.setdefault(session_id, SlidingWindowBuffer())
+    buf_len_before = len(buf._buf)
     window = buf.push(kp)
+
     if window is None:
+        # Log every 10 frames to avoid log flood
+        if buf_len_before % 10 == 0:
+            logger.info(
+                "session=%s person=%s kp_nonzero=%d/%d buf=%d/%d (waiting for full window)",
+                session_id[:8], person_detected,
+                int(np.count_nonzero(kp[:, :2])), len(kp),
+                len(buf._buf), cfg.WINDOW_SIZE,
+            )
         return {"session_id": session_id, "glosses": []}
 
     norm_win = _normalizer(window)
     results = await asyncio.to_thread(_classifier.predict_top3, norm_win)
     buf.on_result(results[0]["gloss"], results[0]["prob"])
 
+    logger.info(
+        "session=%s person=%s → top1=%s conf=%.3f top2=%s conf=%.3f",
+        session_id[:8], person_detected,
+        results[0]["gloss"], results[0]["prob"],
+        results[1]["gloss"] if len(results) > 1 else "-",
+        results[1]["prob"]  if len(results) > 1 else 0,
+    )
+
     return {"session_id": session_id, "glosses": results}
+
+
+@app.post("/debug/frame")
+async def debug_frame(body: dict[str, Any]):
+    """Diagnostic endpoint: returns full pipeline state for a single frame.
+
+    Body: {"data": "<base64-jpeg>", "session_id": str (optional)}
+    Returns detailed info without requiring a full window.
+    """
+    import cv2
+
+    raw = base64.b64decode(body.get("data", ""))
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR) if len(arr) else None
+
+    if frame is None:
+        return JSONResponse(status_code=400, content={"error": "cannot decode image"})
+
+    session_id = body.get("session_id", "debug")
+    kp = await asyncio.to_thread(_extractor.extract, frame)
+
+    nonzero_joints = int(np.count_nonzero(kp[:, :2].any(axis=1)))
+    person_detected = nonzero_joints > 0
+
+    buf = _session_buffers.get(session_id)
+    buf_size = len(buf._buf) if buf else 0
+
+    # Always run inference on available data (pad if needed) for diagnostics
+    if buf_size > 0 and buf is not None:
+        available = np.stack(list(buf._buf), axis=0)
+    else:
+        available = kp[np.newaxis]  # single frame as fallback
+
+    # Pad/trim to WINDOW_SIZE for inference
+    T = cfg.WINDOW_SIZE
+    if len(available) >= T:
+        w = available[-T:]
+    else:
+        repeats = (T // len(available)) + 1
+        w = np.tile(available, (repeats, 1, 1))[:T]
+
+    norm_win = _normalizer(w)
+    results = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+
+    return {
+        "config": {
+            "window_size": cfg.WINDOW_SIZE,
+            "window_stride": cfg.WINDOW_STRIDE,
+            "conf_threshold": cfg.CONF_THRESHOLD,
+            "det_conf": cfg.DWPOSE_DET_CONF,
+        },
+        "frame": {
+            "person_detected": person_detected,
+            "nonzero_joints": nonzero_joints,
+            "total_joints": len(kp),
+            "kp_mean_xy": float(np.abs(kp[:, :2]).mean()),
+        },
+        "buffer": {
+            "current_size": buf_size,
+            "needed": T,
+            "filled_pct": round(buf_size / T * 100, 1),
+        },
+        "prediction_now": results,
+        "session_id": session_id,
+    }
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────── #

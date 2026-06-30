@@ -114,7 +114,7 @@ services:
       CLASS_MAP_PATH: /data/idx_to_class.json
       NUM_CLASSES: "200"
       # Sliding window
-      WINDOW_SIZE: "64"
+      WINDOW_SIZE: "32"
       WINDOW_STRIDE: "30"
       CONF_THRESHOLD: "0.7"
       # Runtime

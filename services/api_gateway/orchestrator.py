@@ -114,7 +114,7 @@ class Orchestrator:
 
         # Skip NLP when confidence is too low — usually means no person in frame
         # or random noise classified by the model.
-        _MIN_CONFIDENCE = 0.35
+        _MIN_CONFIDENCE = 0.15  # lowered for diagnostics; raise to 0.35+ in production
 
         # 2. NLP service — translate glosses to Russian text
         translation = ""
