@@ -112,9 +112,13 @@ class Orchestrator:
             maxlen=500, approximate=True,
         )
 
+        # Skip NLP when confidence is too low — usually means no person in frame
+        # or random noise classified by the model.
+        _MIN_CONFIDENCE = 0.35
+
         # 2. NLP service — translate glosses to Russian text
         translation = ""
-        if glosses:
+        if glosses and confidence >= _MIN_CONFIDENCE:
             try:
                 nlp_resp = await self._http.post(
                     f"{NLP_SERVICE_URL}/translate_topk",
