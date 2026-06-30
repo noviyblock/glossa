@@ -167,6 +167,7 @@ services:
     <<: *svc
     environment:
       NLP_SERVICE_PORT: "8003"
+      NLP_DEVICE: cpu
       MODEL_PATH: /models/qwen2_merged_qwen2_1.5b
       CACHE_SIZE: "500"
       MAX_NEW_TOKENS: "128"
@@ -190,10 +191,11 @@ services:
     <<: *svc
     environment:
       TTS_SERVICE_PORT: "8004"
-      SILERO_REPO: snakers4/silero-models
-      DEFAULT_SPEAKER: xenia
-      SAMPLE_RATE: "24000"
-      CACHE_SIZE: "200"
+      TTS_DEVICE: cpu
+      TTS_SILERO_REPO: snakers4/silero-models
+      TTS_DEFAULT_SPEAKER: xenia
+      TTS_SAMPLE_RATE: "24000"
+      TTS_CACHE_SIZE: "200"
       TORCH_HOME: /torch_cache
     volumes:
       - ./models:/models:ro
