@@ -104,11 +104,9 @@ services:
       # Inference backends
       ONNX_MOBILE_PATH: /models/gesture_classifier_mobile.onnx
       OV_XML_PATH: /models/stgcn_topk_int8/stgcn_topk_int8.xml
-      # Keypoint extraction (DWPose: YOLOX detector + RTMPose body+hand)
-      DWPOSE_DET_PATH: /models/dwpose/yolox_l.onnx
-      DWPOSE_POSE_PATH: /models/dwpose/dw-ll_ucoco_384.onnx
-      DWPOSE_DET_CONF: "0.25"
-      DWPOSE_DET_NMS: "0.45"
+      # Keypoint extraction — rtmlib (RTMDet-nano + RTMW)
+      RTMLIB_MODE: lightweight
+      RTMLIB_DEVICE: cpu
       # Normalisation
       NORM_STATS_PATH: /models/norm_stats.npz
       CLASS_MAP_PATH: /data/idx_to_class.json
@@ -121,14 +119,17 @@ services:
       # Runtime
       CV_SERVICE_PORT: "8001"
       REDIS_URL: redis://redis:6379
-    volumes: *model-vols
+    volumes:
+      - ./models:/models:ro
+      - ./data:/data:ro
+      - rtmlib-models:/home/glossa/.rtmlib
     depends_on:
       redis:
         condition: service_healthy
     healthcheck:
       <<: *hc
       test: ["CMD", "curl", "-f", "http://localhost:8001/health/live"]
-      start_period: 60s
+      start_period: 90s
     ports:
       - "8001:8001"
 
@@ -253,3 +254,4 @@ volumes:
   prometheus-data:
   grafana-data:
   torch-cache:
+  rtmlib-models:

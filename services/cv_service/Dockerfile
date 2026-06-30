@@ -30,7 +30,9 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
 
 FROM deps AS production
 COPY . .
-RUN chown -R glossa:glossa /app
+RUN chown -R glossa:glossa /app \
+    && mkdir -p /home/glossa/.rtmlib \
+    && chown -R glossa:glossa /home/glossa/.rtmlib
 USER glossa
 EXPOSE 8001
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
