@@ -6,17 +6,36 @@ import numpy as np
 
 from config import RTMLIB_DEVICE, RTMLIB_MODE
 
-# Dataset keypoint layout (matches offline extraction + ST-GCN training):
-#   0-16   COCO-WholeBody body  (17 pts)
+# Dataset keypoint layout (matches offline extraction + ST-GCN training).
+#
+# The offline extraction script (colab_glossa_00_preprocess_dwpose_200.ipynb)
+# used controlnet_aux's DwposeDetector, which returns body keypoints as
+# OpenPose-18 JSON (pose_keypoints_2d) and remaps them into a "COCO-17" array
+# via op_to_coco = [0,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]. That produces
+# a DIFFERENT ordering than the literal COCO-WholeBody body layout that
+# rtmlib/DWPose ONNX models output directly:
+#   training body17 = [nose, Rsho, Relb, Rwri, Lsho, Lelb, Lwri,
+#                       Rhip, Rkne, Rank, Lhip, Lkne, Lank, Reye, Leye, Rear, Lear]
+#   true COCO-17    = [nose, Leye, Reye, Lear, Rear, Lsho, Rsho,
+#                       Lelb, Relb, Lwri, Rwri, Lhip, Rhip, Lkne, Rkne, Lank, Rank]
+# _COCO17_TO_TRAINING_ORDER permutes true-COCO17 into the order ST-GCN was
+# trained on, so live inference matches the offline features bit-for-bit.
+#
+#   0-16   body (17 pts, training order — see above)
 #   17-22  COCO-WholeBody feet  (6 pts)
-#   23-32  duplicated key body joints to pad pose to 33 pts:
-#          shoulders(5,6), hips(11,12), knees(13,14), ankles(15,16), shoulders(5,6)
+#   23-32  duplicated key body joints to pad pose to 33 pts (indices into the
+#          training-order body17: originally intended as shoulders/hips/knees/
+#          ankles, but since body17 is in training order these actually pick
+#          out elbows/wrists/knees/ankles/eyes/ears — kept as-is to match
+#          what the offline script produced, since consistency with training
+#          data matters more than the (stale) anatomical naming)
 #   33-53  left hand  (COCO-WholeBody 91-111, 21 pts)
 #   54-74  right hand (COCO-WholeBody 112-132, 21 pts)
 _N_POSE   = 33
 _N_HAND   = 21
 _TOTAL_KP = _N_POSE + _N_HAND + _N_HAND  # 75
 
+_COCO17_TO_TRAINING_ORDER = [0, 6, 8, 10, 5, 7, 9, 12, 14, 16, 11, 13, 15, 2, 1, 4, 3]
 _EXTRA_JOINT_SRC = [5, 6, 11, 12, 13, 14, 15, 16, 5, 6]  # → indices 23-32
 
 logger = logging.getLogger(__name__)
@@ -24,9 +43,9 @@ logger = logging.getLogger(__name__)
 
 def _remap_coco133_to_75(kp133: np.ndarray) -> np.ndarray:
     """kp133: (133, 3) [x, y, score] in COCO-WholeBody order → (75, 3)."""
-    body17     = kp133[0:17]
+    body17     = kp133[0:17][_COCO17_TO_TRAINING_ORDER]
     feet6      = kp133[17:23]
-    extra10    = kp133[_EXTRA_JOINT_SRC]
+    extra10    = body17[_EXTRA_JOINT_SRC]
     pose33     = np.concatenate([body17, feet6, extra10], axis=0)
     left_hand  = kp133[91:112]
     right_hand = kp133[112:133]
