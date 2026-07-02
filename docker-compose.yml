@@ -113,11 +113,26 @@ services:
       CLASS_MAP_PATH: /data/idx_to_class.json
       NUM_CLASSES: "200"
       # Sliding window — model input is 64 frames (ST-GCN trained on T=64,
-      # see scripts/patch_colab_03_scenario.py), early emit after 10
+      # see scripts/patch_colab_03_scenario.py). WINDOW_STRIDE/EARLY_EMIT/
+      # CONF_THRESHOLD are now only consumed by the unused legacy /ws
+      # streaming endpoint (see main.py) — /process_frame (the live path)
+      # uses GESTURE_* config below instead. Left in place as harmless dead
+      # config rather than churning this file for an unrelated cleanup.
       WINDOW_SIZE: "64"
       WINDOW_STRIDE: "5"
       EARLY_EMIT: "10"
       CONF_THRESHOLD: "0.7"
+      # Gesture segmentation (automatic onset/offset from hand motion,
+      # replaces the manual hold-to-sign button) — tune empirically against
+      # the live camera/users, see gesture_segmenter.py docstring.
+      GESTURE_ONSET_THRESHOLD: "0.06"
+      GESTURE_OFFSET_THRESHOLD: "0.03"
+      GESTURE_ONSET_FRAMES: "3"
+      GESTURE_OFFSET_FRAMES: "8"
+      GESTURE_HAND_PRESENCE_CONF: "0.3"
+      GESTURE_PREROLL_FRAMES: "5"
+      GESTURE_MIN_FRAMES: "8"
+      GESTURE_MAX_FRAMES: "150"
       # Runtime
       CV_SERVICE_PORT: "8001"
       REDIS_URL: redis://redis:6379

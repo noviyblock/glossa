@@ -106,6 +106,7 @@ class Orchestrator:
         confidence = glosses[0]["prob"] if glosses else 0.0
         keypoints: list | None = cv_data.get("keypoints")
         person_detected: bool = cv_data.get("person_detected", False)
+        gesture_active: bool = cv_data.get("gesture_active", False)
 
         # Publish to cv:results stream for external consumers
         await self._redis.xadd(
@@ -149,52 +150,8 @@ class Orchestrator:
         })
 
         return {"glosses": glosses, "translation": translation, "confidence": confidence,
-                "keypoints": keypoints, "person_detected": person_detected}
-
-    # ── Gesture segmentation helpers ──────────────────────────────────────── #
-
-    async def reset_gesture_buffer(self, session_id: str) -> None:
-        """Clear the CV sliding window so a fresh gesture sequence starts."""
-        try:
-            await self._http.post(
-                f"{CV_SERVICE_URL}/reset_buffer",
-                json={"session_id": session_id},
-            )
-        except Exception as exc:
-            logger.warning("reset_buffer session=%s: %s", session_id, exc)
-
-    async def flush_gesture_buffer(self, session_id: str) -> dict | None:
-        """Force-classify whatever frames are in the buffer right now."""
-        try:
-            resp = await self._http.post(
-                f"{CV_SERVICE_URL}/flush_buffer",
-                json={"session_id": session_id},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.warning("flush_buffer session=%s: %s", session_id, exc)
-            return None
-
-        glosses = data.get("glosses", [])
-        if not glosses:
-            return None
-
-        confidence = glosses[0]["prob"]
-        translation = ""
-        if confidence >= 0.10:
-            try:
-                nlp_resp = await self._http.post(
-                    f"{NLP_SERVICE_URL}/translate_topk",
-                    json={"hypotheses": glosses},
-                )
-                nlp_resp.raise_for_status()
-                translation = nlp_resp.json().get("translation", "")
-            except Exception as exc:
-                logger.warning("NLP flush session=%s: %s", session_id, exc)
-                translation = glosses[0]["gloss"]
-
-        return {"glosses": glosses, "translation": translation, "confidence": confidence}
+                "keypoints": keypoints, "person_detected": person_detected,
+                "gesture_active": gesture_active}
 
     # ── Pipeline: Text → RSL ──────────────────────────────────────────────── #
 

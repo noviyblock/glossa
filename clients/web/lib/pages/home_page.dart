@@ -55,8 +55,8 @@ class _HomePageState extends State<HomePage> {
   DateTime? _lastFrameSent;
   // Prevents frame queue buildup: only one frame in-flight at a time
   bool _waitingForResponse = false;
-  // Gesture segmentation: hold button while signing
-  bool _gesturing = false;
+  // Server-driven: gesture segmentation is automatic (hand-motion based)
+  bool _gestureActive = false;
 
   // Skeleton overlay — two-buffer animation
   List<List<double>>? _targetKp;  // latest from server
@@ -120,6 +120,7 @@ class _HomePageState extends State<HomePage> {
       _targetKp = null;
       _displayKp = null;
       _showSkeleton = false;
+      _gestureActive = false;
     });
   }
 
@@ -157,18 +158,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ── RSL WS ───────────────────────────────────────────────────────────────── //
-
-  void _onGestureStart() {
-    if (_rslStatus != _WsStatus.connected) return;
-    setState(() => _gesturing = true);
-    _rslWs!.sink.add(jsonEncode({'type': 'gesture_start', 'session_id': _sessionId}));
-  }
-
-  void _onGestureEnd() {
-    if (!_gesturing || _rslStatus != _WsStatus.connected) return;
-    setState(() => _gesturing = false);
-    _rslWs!.sink.add(jsonEncode({'type': 'gesture_end', 'session_id': _sessionId}));
-  }
 
   Future<void> _connectRslWs() async {
     setState(() => _rslStatus = _WsStatus.connecting);
@@ -217,6 +206,7 @@ class _HomePageState extends State<HomePage> {
         }
 
         final personDetected = payload['person_detected'] as bool? ?? false;
+        final gestureActive = payload['gesture_active'] as bool? ?? false;
         // Skeleton holdout: keep showing 500ms after person disappears (avoids flicker)
         if (personDetected) {
           _hideSkeletonTimer?.cancel();
@@ -232,7 +222,8 @@ class _HomePageState extends State<HomePage> {
 
         setState(() {
           _waitingForResponse = false; // Unblock next frame
-          _liveGlosses = items;
+          _gestureActive = gestureActive;
+          if (items.isNotEmpty) _liveGlosses = items;
           if (_lastFrameSent != null) {
             _latencyMs = DateTime.now().difference(_lastFrameSent!).inMilliseconds;
           }
@@ -459,41 +450,37 @@ class _HomePageState extends State<HomePage> {
               ),
               if (_cameraActive) ...[
                 const SizedBox(width: 8),
-                // Hold to sign button: press=start recording, release=translate
-                GestureDetector(
-                  onTapDown: (_) => _onGestureStart(),
-                  onTapUp: (_) => _onGestureEnd(),
-                  onTapCancel: _onGestureEnd,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 150),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: _gesturing
-                          ? Colors.redAccent.withValues(alpha: 0.92)
-                          : Colors.white.withValues(alpha: 0.85),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: _gesturing ? Colors.redAccent : cs.outline,
-                        width: _gesturing ? 2 : 1,
+                // Passive status pill — gesture detection is automatic
+                // (server-side hand-motion segmentation), no touch needed.
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: _gestureActive
+                        ? Colors.redAccent.withValues(alpha: 0.92)
+                        : Colors.white.withValues(alpha: 0.85),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: _gestureActive ? Colors.redAccent : cs.outline,
+                      width: _gestureActive ? 2 : 1,
+                    ),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(
+                      _gestureActive ? Icons.fiber_manual_record : Icons.pan_tool_outlined,
+                      size: 14,
+                      color: _gestureActive ? Colors.white : cs.onSurface,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _gestureActive ? 'Распознаю жест…' : 'Готово к жесту',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: _gestureActive ? Colors.white : cs.onSurface,
                       ),
                     ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(
-                        _gesturing ? Icons.fiber_manual_record : Icons.pan_tool_outlined,
-                        size: 14,
-                        color: _gesturing ? Colors.white : cs.onSurface,
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        _gesturing ? 'Идёт запись…' : 'Держи — жест',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: _gesturing ? Colors.white : cs.onSurface,
-                        ),
-                      ),
-                    ]),
-                  ),
+                  ]),
                 ),
               ],
             ]),
