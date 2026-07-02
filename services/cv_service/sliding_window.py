@@ -10,8 +10,8 @@ from config import CONF_THRESHOLD, EARLY_EMIT, WINDOW_SIZE, WINDOW_STRIDE
 def _resample_to(window: np.ndarray, target_T: int) -> np.ndarray:
     """Linearly resample temporal axis from T to target_T frames.
 
-    Used to feed the ST-GCN model (trained on 32-frame windows) from a
-    partially-filled buffer so that first results arrive sooner.
+    Used to feed the ST-GCN model (trained on 64-frame windows, WINDOW_SIZE)
+    from a partially-filled buffer so that first results arrive sooner.
     """
     T, N, C = window.shape
     if T == target_T:
@@ -33,9 +33,11 @@ class SlidingWindowBuffer:
     - Early emit when top-1 confidence >= CONF_THRESHOLD (then reset).
     - Reset after 3 consecutive top-1 gesture changes (rapid scene change).
 
-    With the defaults (EARLY_EMIT=10, WINDOW_STRIDE=5) and ~5fps inference:
-      • First result arrives in 10 × 200ms ≈ 2 seconds.
-      • Subsequent results every 5 × 200ms ≈ 1 second.
+    With the defaults (EARLY_EMIT=10, WINDOW_STRIDE=5) and ~90ms/frame inference
+    (rtmlib RTMDet-nano + RTMW):
+      • First result arrives in ~10 × 90ms ≈ 900ms (resampled to WINDOW_SIZE=64).
+      • Subsequent results every ~5 × 90ms ≈ 450ms until the buffer fills to 64,
+        then every 5 real frames.
     """
 
     def __init__(

@@ -30,7 +30,7 @@ class GlossResult(TypedDict):
 class GestureClassifier:
     """OpenVINO INT8 with ONNX Runtime fallback.
 
-    Input:  (1, T, J, C) = (1, 32, 75, 3) float32
+    Input:  (1, T, J, C) = (1, 64, 75, 3) float32  — T must equal WINDOW_SIZE
     Output: softmax scores of shape (1, num_classes)
     """
 
