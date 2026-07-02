@@ -53,7 +53,10 @@ class GestureClassifier:
     @staticmethod
     def _load_model(ov_xml: str, onnx_path: str):
         try:
-            from openvino.runtime import Core  # type: ignore
+            try:
+                from openvino import Core  # type: ignore  # OpenVINO >= 2024: flat namespace
+            except ImportError:
+                from openvino.runtime import Core  # type: ignore  # OpenVINO < 2024
             core = Core()
             model = core.read_model(ov_xml)
             compiled = core.compile_model(model, "CPU")
