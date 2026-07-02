@@ -69,11 +69,16 @@ DWPose, и модель никогда не видела ни одного та�
    198 классов, которых в новых данных нет)}.
 5. Сравнить accuracy до/после на старой (DWPose) val-выборке — не должно
    заметно просесть — и на новой (RTMW) val-выборке — должно вырасти.
-6. Экспортировать в ONNX/OpenVINO под НОВЫМИ именами файлов — не
-   перезаписывать продакшен-артефакты автоматически, руками промотировать
-   после проверки.
+6. Экспортировать в PyTorch/ONNX/**OpenVINO INT8** (квантование — прямо
+   здесь, через `nncf.quantize()`, на РЕАЛЬНОЙ калибровочной выборке —
+   old val + new RTMW val — а не на синтетическом шуме, которым калибровался
+   текущий продакшен-INT8) — всё под НОВЫМИ именами/путями, продакшен-
+   артефакты не перезаписываются автоматически, промоушен — руками после
+   проверки на камере."""
+    ))
 
-**Важная отдельная находка (не чинится в этом ноутбуке — см. последнюю
+    cells.append(md(
+"""**Важная отдельная находка (не чинится в этом ноутбуке — см. последнюю
 ячейку):** графовая структура (`load_skeleton_graph()` в `colab_glossa_01a`)
 похоже построена в предположении ИСТИННОГО COCO-17 порядка точек
 (рёбра вида `(5,7)` = "плечо-локоть" под COCO-нумерацией), а реальные
@@ -332,18 +337,238 @@ print(f'new train={len(new_X_train)}  new val={len(new_X_val)}')"""
 
     # ── 4. Загрузка существующей модели + старого датасета ─────────────────── #
     cells.append(md(
-"""## Ячейка 7 — Загрузка текущего чекпоинта и старого (DWPose) датасета
+"""## Ячейка 7 — Архитектура ST-GCN + загрузка текущего чекпоинта и старого (DWPose) датасета
 
-Нужны определения `STGCN`/`GraphConv`/`TCN`/`STGCNBlock`/`load_skeleton_graph`
-из `colab_glossa_01a_train_stgcn_64_200.ipynb` — выполните эти ячейки того
-ноутбука перед этим (или скопируйте класс сюда — граф и архитектура должны
-быть идентичны чекпоинту, иначе `load_state_dict` не сработает)."""
+`load_skeleton_graph`/`GraphConv`/`TCN`/`STGCNBlock`/`STGCN` скопированы
+**дословно** из `colab_glossa_01a_train_stgcn_64_200.ipynb` — архитектура и
+граф должны быть идентичны тому, на чём обучен чекпоинт, иначе
+`load_state_dict()` упадёт по shape mismatch. **Если архитектуру поменяли в
+`colab_glossa_01a` — обновите и здесь.**"""
     ))
     cells.append(code(
-"""# --- ЗАМЕНИТЕ на фактическое содержимое ячеек STGCN/GraphConv/TCN/STGCNBlock/
-#     load_skeleton_graph из colab_glossa_01a_train_stgcn_64_200.ipynb, либо
-#     выполните тот ноутбук в этой же runtime перед этой ячейкой. ---
-assert 'STGCN' in dir(), 'Определите класс STGCN (см. colab_glossa_01a) перед продолжением'
+"""import numpy as np
+import torch
+import torch.nn as nn
+from scipy.sparse.csgraph import connected_components
+
+A_np = None
+A_partition_np = None
+
+def load_skeleton_graph():
+    \"\"\"Граф скелета — дословная копия colab_glossa_01a::load_skeleton_graph().\"\"\"
+    global A_np, A_partition_np
+
+    COCO_EDGES = [
+        (0, 1), (0, 2), (1, 3), (2, 4),
+        (5, 6), (5, 7), (6, 8), (7, 9),
+        (5, 11), (6, 12), (11, 12),
+        (11, 13), (13, 15), (15, 17), (17, 19),
+        (12, 14), (14, 16), (16, 18), (18, 20),
+        (0, 5), (0, 6),
+        (5, 7), (7, 9),
+        (6, 8), (8, 10),
+    ]
+    FEET_EDGES = [
+        (17, 19), (19, 21),
+        (18, 20), (20, 22),
+        (17, 18),
+    ]
+    EXTRA_EDGES = [
+        (23, 5), (24, 6),
+        (25, 11), (26, 12),
+        (27, 13), (28, 14),
+        (29, 15), (30, 16),
+        (31, 5), (32, 6),
+    ]
+    HAND_EDGES = [
+        (0, 1), (0, 5), (0, 9), (0, 13), (0, 17),
+        (1, 2), (2, 3), (3, 4),
+        (5, 6), (6, 7), (7, 8),
+        (9, 10), (10, 11), (11, 12),
+        (13, 14), (14, 15), (15, 16),
+        (17, 18), (18, 19), (19, 20),
+    ]
+
+    edges = set()
+    for i, j in COCO_EDGES:
+        if i < 17 and j < 17:
+            edges.add((i, j)); edges.add((j, i))
+    for i, j in FEET_EDGES:
+        if 17 <= i <= 22 and 17 <= j <= 22:
+            edges.add((i, j)); edges.add((j, i))
+    for i, j in EXTRA_EDGES:
+        edges.add((i, j)); edges.add((j, i))
+    for i, j in HAND_EDGES:
+        edges.add((33 + i, 33 + j)); edges.add((33 + j, 33 + i))
+        edges.add((54 + i, 54 + j)); edges.add((54 + j, 54 + i))
+
+    edges.add((7, 33)); edges.add((33, 7))
+    edges.add((4, 54)); edges.add((54, 4))
+    edges.add((5, 33)); edges.add((33, 5))
+    edges.add((6, 54)); edges.add((54, 6))
+
+    face_nodes = [1, 2, 3, 8, 9, 10]
+    for node in face_nodes:
+        edges.add((node, 0)); edges.add((0, node))
+
+    edges.add((15, 17)); edges.add((17, 15))
+    edges.add((16, 18)); edges.add((18, 16))
+
+    V = 75
+    A = np.zeros((V, V), dtype=np.float32)
+    for i, j in edges:
+        A[i, j] = 1.0; A[j, i] = 1.0
+    np.fill_diagonal(A, 1.0)
+
+    isolated = np.where((A > 0).sum(axis=1) - 1 == 0)[0]
+    for node in isolated:
+        if node < 33:
+            A[node, 0] = 1.0; A[0, node] = 1.0
+        elif node < 54:
+            A[node, 33] = 1.0; A[33, node] = 1.0
+        else:
+            A[node, 54] = 1.0; A[54, node] = 1.0
+
+    n_components, labels = connected_components(A, directed=False)
+    if n_components > 1:
+        comp_nodes = [np.where(labels == comp)[0] for comp in range(n_components)]
+        for i in range(1, n_components):
+            a, b = comp_nodes[0][0], comp_nodes[i][0]
+            A[a, b] = 1.0; A[b, a] = 1.0
+
+    deg = A.sum(axis=1)
+    d_inv_sqrt = np.where(deg > 1e-8, 1.0 / np.sqrt(deg), 0.0)
+    A_norm = A * d_inv_sqrt[:, None] * d_inv_sqrt[None, :]
+
+    binary = (A > 0).astype(np.float32)
+    np.fill_diagonal(binary, 0)
+    dist = np.full(V, np.inf)
+    dist[0] = 0
+    queue = [0]
+    while queue:
+        v = queue.pop(0)
+        for u in np.where(binary[v] > 0)[0]:
+            if dist[u] == np.inf:
+                dist[u] = dist[v] + 1
+                queue.append(u)
+
+    partition = np.zeros((3, V, V), dtype=np.float32)
+    for i in range(V):
+        for j in range(V):
+            w = A_norm[i, j]
+            if w == 0:
+                continue
+            if i == j:
+                partition[0, i, j] = w
+            elif dist[j] <= dist[i]:
+                partition[1, i, j] = w
+            else:
+                partition[2, i, j] = w
+
+    A_np = A_norm
+    A_partition_np = partition
+    print(f'Граф готов: V={V}, E={len(edges)}, компонент связности={n_components}')
+    return A_np, A_partition_np
+
+A_np, A_partition_np = load_skeleton_graph()
+
+
+class GraphConv(nn.Module):
+    \"\"\"ST-GCN graph convolution.\"\"\"
+    def __init__(self, in_ch: int, out_ch: int, mobile: bool = False) -> None:
+        super().__init__()
+        self.K = 1 if mobile else 3
+        self.mobile = mobile
+        if mobile:
+            self.register_buffer('A', torch.tensor(A_np, dtype=torch.float32).unsqueeze(0))
+        else:
+            self.register_buffer('A', torch.tensor(A_partition_np, dtype=torch.float32))
+            self.M = nn.Parameter(torch.zeros(self.K, A_np.shape[0], A_np.shape[0]))
+        self.convs = nn.ModuleList([nn.Conv2d(in_ch, out_ch, kernel_size=1) for _ in range(self.K)])
+        self.bn = nn.BatchNorm2d(out_ch)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = 0
+        for k in range(self.K):
+            A_eff = self.A[k] if self.mobile else (self.A[k] + self.M[k])
+            branch = self.convs[k](x)
+            out = out + torch.einsum('bctv,vw->bctw', branch, A_eff)
+        return self.bn(out)
+
+
+class TCN(nn.Module):
+    \"\"\"Temporal Convolution Block.\"\"\"
+    def __init__(self, ch: int, stride: int = 1, kernel: int = 9, dropout: float = 0.5) -> None:
+        super().__init__()
+        pad = (kernel - 1) // 2
+        self.net = nn.Sequential(
+            nn.BatchNorm2d(ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(ch, ch, kernel_size=(kernel, 1), stride=(stride, 1), padding=(pad, 0)),
+            nn.BatchNorm2d(ch),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class STGCNBlock(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1, residual: bool = True,
+                 mobile: bool = False, tcn_dropout: float = 0.5) -> None:
+        super().__init__()
+        self.gcn = GraphConv(in_ch, out_ch, mobile=mobile)
+        self.tcn = TCN(out_ch, stride=stride, dropout=tcn_dropout)
+        self.relu = nn.ReLU(inplace=True)
+        self._no_res = not residual
+        if residual and (in_ch != out_ch or stride != 1):
+            self.skip = nn.Sequential(nn.Conv2d(in_ch, out_ch, 1, stride=(stride, 1)), nn.BatchNorm2d(out_ch))
+        elif residual:
+            self.skip = nn.Identity()
+        else:
+            self.skip = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = 0 if self._no_res else self.skip(x)
+        return self.relu(self.tcn(self.gcn(x)) + res)
+
+
+class STGCN(nn.Module):
+    \"\"\"ST-GCN для распознавания жестов РЖЯ (датасет Slovo, топ-200 классов).\"\"\"
+    _CFG = [
+        (3, 64, 1, False),
+        (64, 64, 1, True),
+        (64, 64, 1, True),
+        (64, 128, 2, True),
+        (128, 128, 1, True),
+        (128, 256, 2, True),
+        (256, 256, 1, True),
+    ]
+
+    def __init__(self, num_classes: int = 200, num_nodes: int = 75, mobile: bool = False,
+                 tcn_dropout: float = 0.5, fc_dropout: float = 0.5) -> None:
+        super().__init__()
+        self.data_bn = nn.BatchNorm1d(3 * num_nodes)
+        self.layers = nn.ModuleList([
+            STGCNBlock(ic, oc, st, res, mobile=mobile, tcn_dropout=tcn_dropout)
+            for ic, oc, st, res in self._CFG
+        ])
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.drop = nn.Dropout(fc_dropout)
+        self.fc = nn.Linear(256, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, V, C = x.shape
+        x = x.permute(0, 1, 3, 2).contiguous().view(B * T, C * V)
+        x = self.data_bn(x)
+        x = x.view(B, T, C, V).permute(0, 2, 1, 3).contiguous()
+        for layer in self.layers:
+            x = layer(x)
+        x = self.pool(x).view(B, -1)
+        return self.fc(self.drop(x))
+
+print('Классы ST-GCN определены (идентично colab_glossa_01a).')
+
 
 CKPT_PATH = f'{MODELS_DIR}/stgcn_final.pt'
 NUM_CLASSES, NUM_NODES, SEQ_LEN = 200, 75, 64
@@ -490,12 +715,20 @@ if best_state is not None:
 
     # ── 7. Экспорт ────────────────────────────────────────────────────────── #
     cells.append(md(
-"""## Ячейка 11 — Экспорт (НЕ перезаписывает продакшен-файлы)
+"""## Ячейка 11 — Экспорт + автоматическое INT8-квантование (НЕ перезаписывает продакшен-файлы)
 
-Сохраняет под новыми именами (`*_rtmw_ft.*`). После проверки на реальной
-камере — переименовать/скопировать вручную поверх продакшен-путей
-(`gesture_classifier_mobile.onnx`, `stgcn_topk_int8/`), как в
-`colab_glossa_03_export_inference_topk.ipynb`."""
+Сохраняет PyTorch state_dict, FP32 ONNX и — в отличие от
+`colab_glossa_03_export_inference_topk.ipynb` — сразу же OpenVINO INT8,
+через тот же `nncf.quantize()`, но с одним осознанным улучшением:
+**калибровочная выборка — реальные keypoints (old val + new RTMW val),
+а не синтетический шум**, которым калибровался текущий продакшен-INT8
+(см. комментарий в `colab_glossa_03`: "В production использовать реальные
+кейпоинты из датасета Slovo" — так и не сделали; делаем здесь).
+
+Всё сохраняется под новыми именами/путями (`*_rtmw_ft.*`,
+`stgcn_topk_int8_ft/`) — продакшен-артефакты не трогаются. Ячейка также
+сама проверяет, не потеряла ли INT8-версия точность относительно FP32 на
+этой конкретной модели, прежде чем считать экспорт готовым к промоушену."""
     ))
     cells.append(code(
 """FT_OUT = f'{MODELS_DIR}/finetuned_rtmw'
@@ -505,15 +738,83 @@ torch.save(model.state_dict(), f'{FT_OUT}/stgcn_rtmw_ft.pt')
 
 model.eval()
 dummy = torch.randn(1, SEQ_LEN, NUM_NODES, 3).to(DEVICE)
+onnx_path = f'{FT_OUT}/gesture_classifier_rtmw_ft.onnx'
 torch.onnx.export(
-    model, dummy, f'{FT_OUT}/gesture_classifier_rtmw_ft.onnx',
+    model, dummy, onnx_path,
     input_names=['keypoints'], output_names=['logits'],
     dynamic_axes={'keypoints': {0: 'batch_size'}, 'logits': {0: 'batch_size'}},
     export_params=True, opset_version=18,
 )
-print(f'Сохранено: {FT_OUT}/stgcn_rtmw_ft.pt, {FT_OUT}/gesture_classifier_rtmw_ft.onnx')
-print('Для OpenVINO INT8: прогнать через тот же quantization pipeline, что colab_glossa_03')
-print('(mo/ovc convert + NNCF calibration на смешанном val-наборе old+new).')"""
+print(f'Сохранено: {FT_OUT}/stgcn_rtmw_ft.pt, {onnx_path}')"""
+    ))
+
+    cells.append(md(
+"""## Ячейка 11b — INT8-квантование (NNCF) на реальных калибровочных данных"""
+    ))
+    cells.append(code(
+"""import nncf
+from nncf import Dataset as NNCFDataset
+import openvino as ov
+
+ov_core = ov.Core()
+ov_model_fp32 = ov_core.read_model(onnx_path)
+
+# ── Калибровочная выборка — РЕАЛЬНЫЕ keypoints, не синтетический шум ────── #
+# (старый DWPose val + новый RTMW val, z-scored так же, как на инференсе)
+X_val_old_z = ((np.array(X_val_old).astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+new_X_val_z = ((new_X_val.astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+calib_pool = np.concatenate([X_val_old_z, new_X_val_z], axis=0)
+rng = np.random.default_rng(42)
+N_CALIB = min(300, len(calib_pool))
+calib_idx = rng.choice(len(calib_pool), N_CALIB, replace=False)
+
+def generate_calib_data():
+    for i in calib_idx:
+        yield {'keypoints': calib_pool[i][np.newaxis]}
+
+calib_dataset = NNCFDataset(list(generate_calib_data()))
+print(f'Калибровочная выборка: {N_CALIB} реальных примеров (old val + new RTMW val)')
+
+print('Квантование INT8 (2-5 минут)...')
+ov_model_int8 = nncf.quantize(
+    ov_model_fp32,
+    calib_dataset,
+    preset=nncf.QuantizationPreset.MIXED,
+    subset_size=N_CALIB,
+)
+
+OV_FT_DIR = f'{FT_OUT}/stgcn_topk_int8_ft'
+os.makedirs(OV_FT_DIR, exist_ok=True)
+OV_XML_FT = f'{OV_FT_DIR}/stgcn_topk_int8_ft.xml'
+ov.save_model(ov_model_int8, OV_XML_FT)
+print(f'OpenVINO INT8 сохранён: {OV_XML_FT}')
+
+# ── Проверка: не потеряла ли INT8-версия точность относительно FP32 ─────── #
+compiled_int8 = ov_core.compile_model(ov_model_int8, 'CPU')
+output_int8 = next(iter(compiled_int8.outputs))
+
+def eval_ov_acc(x_z, y_true):
+    correct = 0
+    for i in range(len(x_z)):
+        logits = compiled_int8([x_z[i][np.newaxis]])[output_int8][0]
+        if int(logits.argmax()) == int(y_true[i]):
+            correct += 1
+    return correct / max(len(x_z), 1)
+
+int8_old_acc = eval_ov_acc(X_val_old_z, y_val_old)
+int8_new_acc = eval_ov_acc(new_X_val_z, new_y_val)
+fp32_old_acc = eval_acc(val_old_tensor, val_old_labels)  # уже посчитано в Ячейке 10
+fp32_new_acc = eval_acc(val_new_tensor, val_new_labels)
+
+print(f'\\nFP32  (PyTorch): old_val_acc={fp32_old_acc:.4f}  new_val_acc={fp32_new_acc:.4f}')
+print(f'INT8 (OpenVINO): old_val_acc={int8_old_acc:.4f}  new_val_acc={int8_new_acc:.4f}')
+
+drop = (fp32_old_acc - int8_old_acc) + (fp32_new_acc - int8_new_acc)
+if drop > 0.05:
+    print(f'\\n⚠️  INT8 заметно просел относительно FP32 (суммарно -{drop:.3f}) — '
+          f'перед промоушеном в прод либо увеличьте N_CALIB, либо используйте FP32 ONNX временно.')
+else:
+    print(f'\\n✅ INT8 не потерял заметной точности относительно FP32 — можно промотировать в прод.')"""
     ))
 
     # ── 8. Отдельная находка про граф ────────────────────────────────────── #
