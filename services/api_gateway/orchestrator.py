@@ -107,6 +107,18 @@ class Orchestrator:
         keypoints: list | None = cv_data.get("keypoints")
         person_detected: bool = cv_data.get("person_detected", False)
         gesture_active: bool = cv_data.get("gesture_active", False)
+        is_preview: bool = cv_data.get("preview", False)
+
+        # Preview classifications (early, provisional — segment keeps
+        # accumulating) skip NLP translation and session persistence
+        # entirely: the point is fast raw-gloss feedback, not a final
+        # answer. Running the LLM on every preview would add seconds of
+        # latency right before the real result and could clobber
+        # last_translation/history with an empty/provisional value.
+        if is_preview:
+            return {"glosses": glosses, "translation": "", "confidence": confidence,
+                    "keypoints": keypoints, "person_detected": person_detected,
+                    "gesture_active": gesture_active, "preview": True}
 
         # Publish to cv:results stream for external consumers
         await self._redis.xadd(
@@ -118,14 +130,20 @@ class Orchestrator:
         # Skip NLP when confidence is too low — usually means no person in frame
         # or random noise classified by the model.
         _MIN_CONFIDENCE = 0.15  # lowered for diagnostics; raise to 0.35+ in production
+        _HISTORY_TURNS  = 2      # recent translated sentences given to the LLM as context
 
-        # 2. NLP service — translate glosses to Russian text
+        # 2. NLP service — translate glosses to Russian text, using recent
+        # conversation history so the LLM can disambiguate among the top-3
+        # candidates by semantic coherence, not just raw confidence.
+        prior_session = await self._get_session(session_id) or {}
+        history: list[str] = list(prior_session.get("history", []))
+
         translation = ""
         if glosses and confidence >= _MIN_CONFIDENCE:
             try:
                 nlp_resp = await self._http.post(
                     f"{NLP_SERVICE_URL}/translate_topk",
-                    json={"hypotheses": glosses},
+                    json={"hypotheses": glosses, "context": history},
                 )
                 nlp_resp.raise_for_status()
                 translation = nlp_resp.json().get("translation", "")
@@ -143,15 +161,19 @@ class Orchestrator:
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         logger.info("rsl_to_text latency=%.1fms session=%s", latency_ms, session_id)
 
-        # Persist session state
+        # Persist session state, including a short rolling history for the
+        # next call's context (only append non-empty, genuinely new turns).
+        if translation and (not history or history[-1] != translation):
+            history = (history + [translation])[-_HISTORY_TURNS:]
+
         await self._set_session(session_id, {
             "mode": "rsl_to_text", "last_translation": translation,
-            "last_glosses": glosses, "latency_ms": latency_ms,
+            "last_glosses": glosses, "latency_ms": latency_ms, "history": history,
         })
 
         return {"glosses": glosses, "translation": translation, "confidence": confidence,
                 "keypoints": keypoints, "person_detected": person_detected,
-                "gesture_active": gesture_active}
+                "gesture_active": gesture_active, "preview": False}
 
     # ── Pipeline: Text → RSL ──────────────────────────────────────────────── #
 

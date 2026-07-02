@@ -50,15 +50,20 @@ class GestureSegmenter:
         self._segment: list[np.ndarray] = []
         self._preroll: deque[np.ndarray] = deque(maxlen=GESTURE_PREROLL_FRAMES)
         self._last_activity = 0.0
+        self._preview_emitted = False
 
     # ------------------------------------------------------------------ #
 
-    def push(self, kp: np.ndarray) -> tuple[np.ndarray | None, bool]:
+    def push(self, kp: np.ndarray) -> tuple[np.ndarray | None, bool, bool]:
         """Feed one raw (75, 3) extractor-output frame (not normalized).
 
-        Returns (window, gesture_active): window is (WINDOW_SIZE, 75, 3)
-        float32 ready for Normalizer + GestureClassifier, or None if no
-        gesture just completed on this frame.
+        Returns (window, gesture_active, is_preview): window is
+        (WINDOW_SIZE, 75, 3) float32 ready for Normalizer + GestureClassifier,
+        or None if no classification is due on this frame. is_preview is True
+        for the one early, provisional classification emitted once the
+        segment crosses GESTURE_MIN_FRAMES (fast visual feedback — the
+        segment keeps accumulating afterwards, state is NOT reset); the final
+        classification at true offset always has is_preview=False.
         """
         kp = kp.astype(np.float32)
         activity, hands_present = self._compute_activity(kp)
@@ -74,7 +79,7 @@ class GestureSegmenter:
 
     # ------------------------------------------------------------------ #
 
-    def _push_idle(self, kp: np.ndarray, activity: float, hands_present: bool) -> tuple[np.ndarray | None, bool]:
+    def _push_idle(self, kp: np.ndarray, activity: float, hands_present: bool) -> tuple[np.ndarray | None, bool, bool]:
         self._preroll.append(kp)
 
         if hands_present and activity >= GESTURE_ONSET_THRESHOLD:
@@ -87,13 +92,14 @@ class GestureSegmenter:
             self._segment = list(self._preroll)
             self._onset_streak = 0
             self._offset_streak = 0
+            self._preview_emitted = False
             logger.info("session=%s IDLE->ACTIVE activity=%.4f preroll_len=%d",
                         self._session_id[:8], activity, len(self._segment))
-            return None, True
+            return None, True, False
 
-        return None, False
+        return None, False, False
 
-    def _push_active(self, kp: np.ndarray, activity: float, hands_present: bool) -> tuple[np.ndarray | None, bool]:
+    def _push_active(self, kp: np.ndarray, activity: float, hands_present: bool) -> tuple[np.ndarray | None, bool, bool]:
         self._segment.append(kp)
 
         if (not hands_present) or activity <= GESTURE_OFFSET_THRESHOLD:
@@ -107,7 +113,8 @@ class GestureSegmenter:
             window = self._finish_segment()
             self._segment = []
             self._offset_streak = 0
-            return window, True
+            self._preview_emitted = False
+            return window, True, False
 
         if self._offset_streak >= GESTURE_OFFSET_FRAMES:
             segment_len = len(self._segment)
@@ -118,10 +125,17 @@ class GestureSegmenter:
             self._segment = []
             self._onset_streak = 0
             self._offset_streak = 0
+            self._preview_emitted = False
             self._preroll.clear()
-            return window, False
+            return window, False, False
 
-        return None, True
+        if not self._preview_emitted and len(self._segment) >= GESTURE_MIN_FRAMES:
+            self._preview_emitted = True
+            logger.info("session=%s preview at segment_len=%d",
+                        self._session_id[:8], len(self._segment))
+            return self._finish_segment(), True, True
+
+        return None, True, False
 
     # ------------------------------------------------------------------ #
 
@@ -174,6 +188,7 @@ class GestureSegmenter:
         self._segment = []
         self._onset_streak = 0
         self._offset_streak = 0
+        self._preview_emitted = False
         self._preroll.clear()
 
     def force_flush(self) -> np.ndarray | None:

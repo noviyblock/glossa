@@ -30,8 +30,12 @@ SYSTEM_PROMPT = (
 
 TOPK_SYSTEM_PROMPT = (
     "Ты — переводчик русского жестового языка (РЖЯ). \n"
-    "Система распознавания предлагает варианты глосс с вероятностями. \n"
-    "Выбери наиболее связный и переведи в русское предложение. \n"
+    "Система распознавания предлагает варианты глосс с вероятностями — "
+    "не всегда верен именно вариант с наибольшей вероятностью. \n"
+    "Если дан контекст (предыдущие фразы диалога), используй его, чтобы "
+    "выбрать вариант, наиболее связный по смыслу с предыдущим разговором, "
+    "а не просто самый вероятный по отдельности. \n"
+    "Выбери наиболее связный вариант и переведи в русское предложение. \n"
     "ВАЖНО: отвечай ТОЛЬКО на русском языке. \n"
     "Только перевод, без пояснений."
 )
@@ -116,10 +120,13 @@ class Translator:
     def translate(self, gloss_sequence: str) -> str:
         return self.generate(SYSTEM_PROMPT, gloss_sequence)
 
-    def translate_topk(self, hypotheses: list[dict]) -> str:
+    def translate_topk(self, hypotheses: list[dict], context: list[str] | None = None) -> str:
         lines = "\n".join(
             f"{h['gloss']} (вероятность: {h['prob']:.2f})" for h in hypotheses
         )
+        if context:
+            ctx = "\n".join(context[-2:])  # last 1-2 turns — enough for local coherence, keeps prompt short
+            lines = f"Предыдущие фразы диалога:\n{ctx}\n\nВарианты глосс для текущего жеста:\n{lines}"
         return self.generate(TOPK_SYSTEM_PROMPT, lines)
 
     def translate_reverse(self, russian_text: str) -> str:

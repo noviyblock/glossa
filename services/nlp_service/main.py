@@ -118,24 +118,34 @@ async def translate(body: dict[str, Any]):
 async def translate_topk(body: dict[str, Any]):
     """Translate using top-k hypotheses with probabilities.
 
-    Body: {"hypotheses": [{"gloss": "ПРИВЕТ", "prob": 0.85}, ...], "domain": "general"}
+    Body: {"hypotheses": [{"gloss": "ПРИВЕТ", "prob": 0.85}, ...], "domain": "general",
+           "context": ["previous translated sentence", ...]}
+
+    `context` (optional) — recent translated sentences from this session, most
+    recent last. Lets the LLM disambiguate among ambiguous gloss candidates by
+    semantic coherence with the ongoing conversation, not just raw confidence.
+    Skips the cache when context is present, since the same hypotheses can now
+    legitimately translate differently depending on what came before.
     """
     hypotheses = body.get("hypotheses", [])
+    context    = body.get("context") or []
     if not hypotheses:
         return JSONResponse(status_code=400, content={"error": "hypotheses list is empty"})
 
-    # Cache key: canonical string of sorted gloss+prob pairs
     cache_key = "|".join(f"{h['gloss']}:{h['prob']:.3f}" for h in hypotheses)
-    cached = _cache.get(cache_key)
-    if cached is not None:
-        return {"translation": cached, "cached": True, "latency_ms": 0.0}
+    if not context:
+        cached = _cache.get(cache_key)
+        if cached is not None:
+            return {"translation": cached, "cached": True, "latency_ms": 0.0}
 
     t0 = time.perf_counter()
-    translation = await asyncio.to_thread(_translator.translate_topk, hypotheses)
+    translation = await asyncio.to_thread(_translator.translate_topk, hypotheses, context)
     latency_ms  = round((time.perf_counter() - t0) * 1000, 1)
 
-    _cache.set(cache_key, translation)
-    logger.info("translate_topk latency=%.1fms top1=%r", latency_ms, hypotheses[0].get("gloss"))
+    if not context:
+        _cache.set(cache_key, translation)
+    logger.info("translate_topk latency=%.1fms top1=%r context_turns=%d",
+                latency_ms, hypotheses[0].get("gloss"), len(context))
     return {"translation": translation, "cached": False, "latency_ms": latency_ms}
 
 

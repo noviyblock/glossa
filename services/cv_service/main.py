@@ -17,7 +17,8 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 import config as cfg
 from gesture_classifier import GestureClassifier
 from gesture_segmenter import GestureSegmenter
-from keypoint_extractor import KeypointExtractor
+from keypoint_extractor import KeypointExtractor, TrackState
+from keypoint_smoother import KeypointSmoother
 from normalizer import Normalizer
 from sliding_window import SlidingWindowBuffer
 
@@ -31,6 +32,9 @@ _classifier: GestureClassifier  | None = None
 _redis:      aioredis.Redis     | None = None
 _ready = False
 _session_segmenters: dict[str, GestureSegmenter] = {}
+_session_smoothers: dict[str, KeypointSmoother] = {}
+_session_tracks: dict[str, TrackState] = {}
+_session_locks: dict[str, asyncio.Lock] = {}
 _diag_counters: dict[str, int] = {}
 
 
@@ -125,37 +129,58 @@ async def process_frame(body: dict[str, Any]):
 
     session_id = body.get("session_id", "")
     h, w = frame.shape[:2]
-    kp = await asyncio.to_thread(_extractor.extract, frame)
 
-    person_detected = bool(np.any(kp != 0))
-    kp_list = kp.tolist()  # (75, 3) – sent to client for skeleton overlay
+    # Per-session state (GestureSegmenter/KeypointSmoother/TrackState) is
+    # mutated below and is NOT safe under concurrent access — a lock keeps
+    # frames for the same session strictly serialized even if the client (or
+    # a future pipelining change) ever has more than one request for that
+    # session in flight at once. Different sessions still run fully in
+    # parallel (each gets its own lock).
+    lock = _session_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        track = _session_tracks.setdefault(session_id, TrackState())
+        kp = await asyncio.to_thread(_extractor.extract, frame, track)
 
-    seg = _session_segmenters.setdefault(session_id, GestureSegmenter(session_id=session_id))
+        if cfg.SMOOTHING_ENABLED:
+            smoother = _session_smoothers.setdefault(session_id, KeypointSmoother())
+            kp = smoother.smooth(kp, time.monotonic())
 
-    # Periodic diagnostic log (every 30 frames) — activity score included for
-    # empirical threshold tuning (see GESTURE_* constants in config.py).
-    _diag_counters[session_id] = _diag_counters.get(session_id, 0) + 1
-    if _diag_counters[session_id] % 30 == 0:
-        nonzero = int(np.count_nonzero(kp[:, 0]))
-        logger.info(
-            "DIAG session=%s %s size=%dx%d person=%s nonzero_kp=%d/75",
-            session_id[:8], seg.debug_state, w, h, person_detected, nonzero,
-        )
+        person_detected = bool(np.any(kp != 0))
+        kp_list = kp.tolist()  # (75, 3) – sent to client for skeleton overlay
 
-    window, gesture_active = seg.push(kp)
+        seg = _session_segmenters.setdefault(session_id, GestureSegmenter(session_id=session_id))
 
-    if window is None:
-        return {"session_id": session_id, "glosses": [], "keypoints": kp_list,
-                "person_detected": person_detected, "gesture_active": gesture_active}
+        # Periodic diagnostic log (every 30 frames) — activity score included
+        # for empirical threshold tuning (see GESTURE_* constants in config.py).
+        _diag_counters[session_id] = _diag_counters.get(session_id, 0) + 1
+        if _diag_counters[session_id] % 30 == 0:
+            nonzero = int(np.count_nonzero(kp[:, 0]))
+            logger.info(
+                "DIAG session=%s %s size=%dx%d person=%s nonzero_kp=%d/75",
+                session_id[:8], seg.debug_state, w, h, person_detected, nonzero,
+            )
 
-    norm_win = _normalizer(window)
-    results = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+        window, gesture_active, is_preview = seg.push(kp)
 
-    logger.info("session=%s top1=%s conf=%.2f gesture_active=%s",
-                session_id[:8], results[0]["gloss"], results[0]["prob"], gesture_active)
+        if window is None:
+            return {"session_id": session_id, "glosses": [], "keypoints": kp_list,
+                    "person_detected": person_detected, "gesture_active": gesture_active,
+                    "preview": False}
 
-    return {"session_id": session_id, "glosses": results, "keypoints": kp_list,
-            "person_detected": person_detected, "gesture_active": gesture_active}
+        norm_win = _normalizer(window)
+        # TTA only for the FINAL classification — previews stay single-pass
+        # for speed, since they're provisional anyway and get superseded.
+        if cfg.TTA_ENABLED and not is_preview:
+            results = await asyncio.to_thread(_classifier.predict_top3_tta, norm_win)
+        else:
+            results = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+
+        logger.info("session=%s top1=%s conf=%.2f gesture_active=%s preview=%s",
+                    session_id[:8], results[0]["gloss"], results[0]["prob"], gesture_active, is_preview)
+
+        return {"session_id": session_id, "glosses": results, "keypoints": kp_list,
+                "person_detected": person_detected, "gesture_active": gesture_active,
+                "preview": is_preview}
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────── #

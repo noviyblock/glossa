@@ -173,7 +173,8 @@ async def ws_translate(ws: WebSocket, mode: str):
 
     Server → client:
         {"type": "gloss",   "payload": {"glosses": [...], "confidence": 0.85,
-                                         "gesture_active": bool},              "session_id": "..."}
+                                         "gesture_active": bool, "preview": bool},
+                                                                                "session_id": "..."}
         {"type": "chunk",   "payload": {"text": str, "is_final": false},        "session_id": "..."}
         {"type": "result",  "payload": {"text": str, "confidence": float},      "session_id": "..."}
         {"type": "audio",   "payload": {"wav": "<base64>"},                     "session_id": "..."}
@@ -222,6 +223,7 @@ async def ws_translate(ws: WebSocket, mode: str):
                     "keypoints": result.get("keypoints"),
                     "person_detected": result.get("person_detected", False),
                     "gesture_active": result.get("gesture_active", False),
+                    "preview": result.get("preview", False),
                 })
 
                 # 2. Send text translation as partial + final

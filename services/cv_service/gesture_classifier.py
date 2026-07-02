@@ -9,7 +9,7 @@ from typing import TypedDict
 import numpy as np
 from prometheus_client import Histogram
 
-from config import CLASS_MAP_PATH, ONNX_MOBILE_PATH, OV_XML_PATH
+from config import CLASS_MAP_PATH, ONNX_MOBILE_PATH, OV_XML_PATH, TTA_JITTER_SIGMA, TTA_VARIANTS
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,30 @@ class GestureClassifier:
 
     def predict_top3(self, window: np.ndarray) -> list[GlossResult]:
         """Run inference on a (T, J, C) window → top-3 gloss results."""
+        return self._top3_from_probs(self._predict_probs(window))
+
+    def predict_top3_tta(
+        self, window: np.ndarray, n_variants: int = TTA_VARIANTS, jitter_sigma: float = TTA_JITTER_SIGMA,
+    ) -> list[GlossResult]:
+        """Test-time augmentation: average softmax over the window plus
+        `n_variants` gaussian-jittered copies, sigma matching the exact
+        spatial_jitter augmentation the model was trained with (colab_
+        glossa_01a's AugmentedGestureDataset) — the model has specifically
+        learned to be invariant to noise of this shape, so averaging
+        predictions over several draws of it is a well-grounded way to
+        reduce variance from any single (possibly unlucky) resampling of
+        the input, unlike arbitrary alternative resampling schemes.
+        """
+        probs = self._predict_probs(window)
+        rng = np.random.default_rng()
+        for _ in range(max(n_variants - 1, 0)):
+            jittered = window + rng.normal(0, jitter_sigma, size=window.shape).astype(np.float32)
+            probs = probs + self._predict_probs(jittered)
+        probs /= max(n_variants, 1)
+        return self._top3_from_probs(probs)
+
+    def _predict_probs(self, window: np.ndarray) -> np.ndarray:
+        """Run inference on one (T, J, C) window → softmax probability vector."""
         inp = window[np.newaxis].astype(np.float32)  # (1, T, J, C)
 
         start = time.perf_counter()
@@ -89,7 +113,9 @@ class GestureClassifier:
         MODEL_INFERENCE_LATENCY.labels(service="cv-service", model=self._backend).observe(time.perf_counter() - start)
 
         logits0 = np.nan_to_num(logits[0], nan=0.0, posinf=1e4, neginf=-1e4)
-        probs = self._softmax(logits0)
+        return self._softmax(logits0)
+
+    def _top3_from_probs(self, probs: np.ndarray) -> list[GlossResult]:
         top_idx = np.argsort(probs)[::-1][:TOP_K]
         return [
             GlossResult(gloss=self._idx_to_class.get(int(i), str(i)), prob=float(probs[i]))

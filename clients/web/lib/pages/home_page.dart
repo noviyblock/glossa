@@ -50,6 +50,7 @@ class _HomePageState extends State<HomePage> {
   StreamSubscription<dynamic>? _rslSub;
   _WsStatus _rslStatus = _WsStatus.disconnected;
   List<_GlossItem> _liveGlosses = [];
+  bool _liveGlossesPreview = false; // true = early/provisional, not the final classification
   String _rslAudio = '';
   int? _latencyMs;
   DateTime? _lastFrameSent;
@@ -96,7 +97,14 @@ class _HomePageState extends State<HomePage> {
       _canvas = web.HTMLCanvasElement()..width = 640..height = 480;
       if (mounted) setState(() => _cameraActive = true);
       await _connectRslWs();
-      _frameTimer = Timer.periodic(const Duration(milliseconds: 100), (_) => _sendFrame());
+      // Poll frequently (not just every 100ms) so the next frame goes out
+      // as soon as the previous response arrives, not on the next fixed
+      // tick — _waitingForResponse still guarantees only one frame in
+      // flight at a time (server-side session state isn't safe under
+      // concurrent frames — see main.py's per-session lock), so this only
+      // shrinks dead time between "server is free" and "we notice", it
+      // doesn't allow overlapping requests.
+      _frameTimer = Timer.periodic(const Duration(milliseconds: 20), (_) => _sendFrame());
       // 30fps animation tick: smoothly interpolate skeleton toward latest keypoints
       _animTimer = Timer.periodic(const Duration(milliseconds: 33), _animateSkeleton);
     } catch (e) {
@@ -117,6 +125,7 @@ class _HomePageState extends State<HomePage> {
     if (mounted) setState(() {
       _cameraActive = false;
       _liveGlosses = [];
+      _liveGlossesPreview = false;
       _targetKp = null;
       _displayKp = null;
       _showSkeleton = false;
@@ -207,6 +216,7 @@ class _HomePageState extends State<HomePage> {
 
         final personDetected = payload['person_detected'] as bool? ?? false;
         final gestureActive = payload['gesture_active'] as bool? ?? false;
+        final isPreview = payload['preview'] as bool? ?? false;
         // Skeleton holdout: keep showing 500ms after person disappears (avoids flicker)
         if (personDetected) {
           _hideSkeletonTimer?.cancel();
@@ -223,7 +233,10 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           _waitingForResponse = false; // Unblock next frame
           _gestureActive = gestureActive;
-          if (items.isNotEmpty) _liveGlosses = items;
+          if (items.isNotEmpty) {
+            _liveGlosses = items;
+            _liveGlossesPreview = isPreview;
+          }
           if (_lastFrameSent != null) {
             _latencyMs = DateTime.now().difference(_lastFrameSent!).inMilliseconds;
           }
@@ -392,6 +405,14 @@ class _HomePageState extends State<HomePage> {
                 ),
         ),
 
+        // ── Framing guide — "stand here" hint, shown until a person is
+        // confidently tracked. The model was trained on Slovo clips framed
+        // roughly waist-up, centered, frontal — matching that framing
+        // reduces the live/train distribution gap more than any inference
+        // post-processing can. Fades out once real tracking kicks in. ──── //
+        if (_cameraActive && !_showSkeleton)
+          const CustomPaint(painter: _FramingGuidePainter()),
+
         // ── Skeleton overlay (animated at 30fps via _animTimer) ──────────── //
         if (_cameraActive && _showSkeleton && _displayKp != null)
           CustomPaint(
@@ -410,17 +431,27 @@ class _HomePageState extends State<HomePage> {
               children: _liveGlosses.asMap().entries.map((e) {
                 final isTop = e.key == 0;
                 final pct = (e.value.prob * 100).toStringAsFixed(0);
+                // Preview chips (early, provisional — before the gesture has
+                // fully ended) render dimmed with a dashed border and a
+                // trailing "…" so it's visually obvious this may still change.
+                final baseColor = isTop ? cs.primary : Colors.black54;
+                final alpha = _liveGlossesPreview ? 0.5 : (isTop ? 0.88 : 1.0);
                 return Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
-                    color: isTop ? cs.primary.withValues(alpha: 0.88) : Colors.black54,
+                    color: baseColor.withValues(alpha: alpha),
                     borderRadius: BorderRadius.circular(12),
+                    border: _liveGlossesPreview
+                        ? Border.all(color: Colors.white.withValues(alpha: 0.6), width: 1)
+                        : null,
                   ),
-                  child: Text('${e.value.gloss} $pct%',
+                  child: Text(
+                      _liveGlossesPreview ? '${e.value.gloss} $pct%…' : '${e.value.gloss} $pct%',
                       style: TextStyle(
                         color: isTop ? cs.onPrimary : Colors.white,
                         fontSize: 12,
                         fontWeight: isTop ? FontWeight.bold : FontWeight.normal,
+                        fontStyle: _liveGlossesPreview ? FontStyle.italic : FontStyle.normal,
                       )),
                 );
               }).toList(),
@@ -586,6 +617,65 @@ class _HomePageState extends State<HomePage> {
     _glossScrollCtrl.dispose();
     super.dispose();
   }
+}
+
+// ── Framing guide painter ─────────────────────────────────────────────────────── //
+
+/// Dashed "stand here" guide: a waist-up, centered box roughly matching how
+/// the Slovo training clips are framed, plus a head-position dot. Purely a
+/// visual hint for the user — no effect on the pipeline itself.
+class _FramingGuidePainter extends CustomPainter {
+  const _FramingGuidePainter();
+
+  void _drawDashedRRect(Canvas canvas, RRect rrect, Paint paint) {
+    final path = Path()..addRRect(rrect);
+    const dashLen = 8.0, gapLen = 6.0;
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final next = (distance + dashLen).clamp(0.0, metric.length);
+        canvas.drawPath(metric.extractPath(distance, next), paint);
+        distance = next + gapLen;
+      }
+    }
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Waist-up framing box: centered, ~55% width, ~80% height, top-aligned
+    // with a little headroom — approximates typical Slovo-clip framing.
+    final boxW = size.width * 0.55;
+    final boxH = size.height * 0.8;
+    final rect = Rect.fromCenter(
+      center: Offset(size.width / 2, size.height * 0.52),
+      width: boxW,
+      height: boxH,
+    );
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(16));
+
+    _drawDashedRRect(
+      canvas,
+      rrect,
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.55)
+        ..strokeWidth = 2
+        ..style = PaintingStyle.stroke,
+    );
+
+    // Head hint circle near the top of the box
+    final headCenter = Offset(size.width / 2, rect.top + boxH * 0.12);
+    canvas.drawCircle(
+      headCenter,
+      boxH * 0.07,
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.4)
+        ..strokeWidth = 1.5
+        ..style = PaintingStyle.stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_FramingGuidePainter old) => false;
 }
 
 // ── Skeleton painter ──────────────────────────────────────────────────────────── //

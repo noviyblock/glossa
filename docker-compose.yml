@@ -108,6 +108,13 @@ services:
       RTMLIB_MODE: lightweight
       RTMLIB_DEVICE: cpu
       TORCH_HOME: /home/glossa/.rtmlib
+      LOW_CONF_ZERO_THRESHOLD: "0.3"
+      DET_INTERVAL: "5"
+      TRACK_CROP_PADDING: "1.8"
+      SMOOTHING_ENABLED: "true"
+      SMOOTH_MINCUTOFF: "1.0"
+      SMOOTH_BETA: "0.3"
+      SMOOTH_DCUTOFF: "1.0"
       # Normalisation
       NORM_STATS_PATH: /models/norm_stats.npz
       CLASS_MAP_PATH: /data/idx_to_class.json
@@ -128,7 +135,7 @@ services:
       GESTURE_ONSET_THRESHOLD: "0.06"
       GESTURE_OFFSET_THRESHOLD: "0.03"
       GESTURE_ONSET_FRAMES: "3"
-      GESTURE_OFFSET_FRAMES: "8"
+      GESTURE_OFFSET_FRAMES: "6"
       GESTURE_HAND_PRESENCE_CONF: "0.3"
       GESTURE_PREROLL_FRAMES: "5"
       GESTURE_MIN_FRAMES: "8"
