@@ -41,11 +41,9 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", \
      "--workers", "1", "--loop", "uvloop"]
 
 FROM production AS production-gpu
-USER root
-# GestureClassifier always compiles OpenVINO for "CPU" / falls back to onnxruntime's
-# CPUExecutionProvider (the ST-GCN model is tiny, ~10ms P95 on OpenVINO INT8/CPU —
-# no GPU path exists in code, and OpenVINO's GPU plugin targets Intel GPUs, not NVIDIA).
-# onnxruntime-gpu pulls a CUDA version that may not match the host driver/runtime
-# (e.g. requires libcudart.so.13 on a CUDA 12.x host) for zero actual benefit — skip it.
-RUN --mount=type=cache,target=/root/.cache/pip pip install openvino
-USER glossa
+# GestureClassifier always compiles OpenVINO for "CPU" — the ST-GCN model is
+# tiny, ~10ms P95 on OpenVINO INT8/CPU. No GPU path exists in code (OpenVINO
+# is already in the base `production` image's dependencies; this stage is
+# kept only for compose-file compatibility). onnxruntime-gpu pulls a CUDA
+# version that may not match the host driver/runtime for zero actual benefit
+# — skip it.
