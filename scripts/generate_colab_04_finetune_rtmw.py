@@ -599,11 +599,30 @@ print(f'Старый train={len(X_train_old)}  Старый val={len(X_val_old)}
 `model.train()` режиме **без backprop** — только обновить running-статистику
 BatchNorm. Иногда сам по себе даёт заметный прирост, до всякого fine-tune
 градиентами. Пропустите эту ячейку, если новых клипов совсем мало (< 20-30) —
-на таком объёме recalibration может, наоборот, ухудшить статистику."""
+на таком объёме recalibration может, наоборот, ухудшить статистику.
+
+**Важно:** `colab_glossa_01a` обрезает выбросы (`np.clip(x, -10, 10)`) на
+"сырых" (hip/shoulder-normalized, ещё не z-scored) координатах ПЕРЕД
+подсчётом статистики нормализации — это единственный, но критичный шаг,
+которого не было в первой версии этого ноутбука: RTMW иногда даёт единичные
+выбросы (плохо детектированный кадр → shoulder_dist около нуля → взрыв
+координат после деления), и без обрезки такие значения долетают до z-score
+±100+ и разносят running-статистику BatchNorm в NaN на самом
+recalibration-шаге. `to_zscore()` ниже воспроизводит точно тот же порядок
+операций (clip → mean/std), что и в трейне."""
     ))
     cells.append(code(
-"""if len(new_X_train) >= 20:
-    new_X_train_z = ((new_X_train.astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+"""CLIP_VAL = 10.0  # идентично colab_glossa_01a::clip_init
+
+def to_zscore(x_raw: np.ndarray) -> np.ndarray:
+    \"\"\"Обрезка выбросов + z-score — тот же порядок, что colab_glossa_01a
+    (clip на сырых hip/shoulder-normalized координатах, ПОТОМ (x-mean)/std).\"\"\"
+    x_clipped = np.clip(x_raw.astype(np.float32), -CLIP_VAL, CLIP_VAL)
+    return ((x_clipped - mean[0]) / std[0]).astype(np.float32)
+
+
+if len(new_X_train) >= 20:
+    new_X_train_z = to_zscore(new_X_train)
     recalib_tensor = torch.tensor(new_X_train_z, dtype=torch.float32)
 
     model.train()
@@ -635,14 +654,25 @@ FT_BATCH_SIZE = 32
 OVERSAMPLE_NEW = 8   # каждый новый клип повторяется N раз за эпоху
 OLD_SUBSAMPLE = 4000  # сколько старых сэмплов подмешать для регуляризации (None = все)
 
-X_train_old_z = ((np.array(X_train_old).astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+X_train_old_z = to_zscore(np.array(X_train_old))
 if OLD_SUBSAMPLE is not None and len(X_train_old_z) > OLD_SUBSAMPLE:
     keep = np.random.default_rng(42).choice(len(X_train_old_z), OLD_SUBSAMPLE, replace=False)
     X_train_old_z, y_train_old_sub = X_train_old_z[keep], y_train_old[keep]
 else:
     y_train_old_sub = y_train_old
 
-new_X_train_z = ((new_X_train.astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+new_X_train_z = to_zscore(new_X_train)
+
+# Диагностика ДО обучения — тот же класс проверки, что спасал предыдущий
+# прогон постфактум через "экстренный фикс"; лучше поймать здесь.
+for _name, _arr in [('old', X_train_old_z), ('new', new_X_train_z)]:
+    _nan, _inf = np.isnan(_arr).sum(), np.isinf(_arr).sum()
+    print(f'{_name}: shape={_arr.shape} min={_arr.min():.3f} max={_arr.max():.3f} '
+          f'NaN={_nan} Inf={_inf}')
+    assert _nan == 0 and _inf == 0, f'{_name}: остались NaN/Inf после clip — проверьте extraction/normalize_keypoints'
+    assert abs(_arr.min()) <= CLIP_VAL + 1e-3 and abs(_arr.max()) <= CLIP_VAL + 1e-3, \\
+        f'{_name}: значения вне [-{CLIP_VAL},{CLIP_VAL}] после clip — баг в to_zscore()'
+
 new_X_train_z_rep = np.repeat(new_X_train_z, OVERSAMPLE_NEW, axis=0)
 new_y_train_rep = np.repeat(new_y_train, OVERSAMPLE_NEW, axis=0)
 
@@ -657,11 +687,11 @@ ft_loader = torch.utils.data.DataLoader(ft_dataset, batch_size=FT_BATCH_SIZE, sh
 optimizer = torch.optim.Adam(model.parameters(), lr=FT_LR, weight_decay=1e-4)
 criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
 
-X_val_old_z = ((np.array(X_val_old).astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+X_val_old_z = to_zscore(np.array(X_val_old))
 val_old_tensor = torch.tensor(X_val_old_z, dtype=torch.float32)
 val_old_labels = torch.tensor(y_val_old, dtype=torch.long)
 
-new_X_val_z = ((new_X_val.astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+new_X_val_z = to_zscore(new_X_val)
 val_new_tensor = torch.tensor(new_X_val_z, dtype=torch.float32)
 val_new_labels = torch.tensor(new_y_val, dtype=torch.long)
 
@@ -725,6 +755,13 @@ if best_state is not None:
 (см. комментарий в `colab_glossa_03`: "В production использовать реальные
 кейпоинты из датасета Slovo" — так и не сделали; делаем здесь).
 
+**`dynamo=False` в `torch.onnx.export` обязателен.** PyTorch >= 2.9 по
+умолчанию использует новый `torch.export`-based ONNX-экспортёр — граф,
+который он строит для `torch.einsum` внутри `GraphConv`, NNCF не умеет
+квантовать (падает с `KeyError: 'NNN node_select_4'`, воспроизведено
+локально на этой же архитектуре). Старый TorchScript-trace экспортёр
+(`dynamo=False`) даёт граф, который `nncf.quantize()` обрабатывает без проблем.
+
 Всё сохраняется под новыми именами/путями (`*_rtmw_ft.*`,
 `stgcn_topk_int8_ft/`) — продакшен-артефакты не трогаются. Ячейка также
 сама проверяет, не потеряла ли INT8-версия точность относительно FP32 на
@@ -744,6 +781,7 @@ torch.onnx.export(
     input_names=['keypoints'], output_names=['logits'],
     dynamic_axes={'keypoints': {0: 'batch_size'}, 'logits': {0: 'batch_size'}},
     export_params=True, opset_version=18,
+    dynamo=False,  # см. пояснение выше — обязательно для совместимости с NNCF
 )
 print(f'Сохранено: {FT_OUT}/stgcn_rtmw_ft.pt, {onnx_path}')"""
     ))
@@ -760,9 +798,9 @@ ov_core = ov.Core()
 ov_model_fp32 = ov_core.read_model(onnx_path)
 
 # ── Калибровочная выборка — РЕАЛЬНЫЕ keypoints, не синтетический шум ────── #
-# (старый DWPose val + новый RTMW val, z-scored так же, как на инференсе)
-X_val_old_z = ((np.array(X_val_old).astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
-new_X_val_z = ((new_X_val.astype(np.float32) - mean[0]) / std[0]).astype(np.float32)
+# (старый DWPose val + новый RTMW val, clip+z-score так же, как на трейне/инференсе)
+X_val_old_z = to_zscore(np.array(X_val_old))
+new_X_val_z = to_zscore(new_X_val)
 calib_pool = np.concatenate([X_val_old_z, new_X_val_z], axis=0)
 rng = np.random.default_rng(42)
 N_CALIB = min(300, len(calib_pool))
