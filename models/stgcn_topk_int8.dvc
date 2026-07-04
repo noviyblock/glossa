@@ -1,6 +1,6 @@
 outs:
-- md5: dc2459a02b3bbbcc74b8fd2afcd063af.dir
-  size: 2142206
+- md5: 9fbefe7dd0f28ff11b6660561fb7b4d5.dir
+  size: 3063174
   nfiles: 2
   hash: md5
   path: stgcn_topk_int8
