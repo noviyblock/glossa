@@ -109,6 +109,7 @@ services:
       RTMLIB_DEVICE: cpu
       TORCH_HOME: /home/glossa/.rtmlib
       LOW_CONF_ZERO_THRESHOLD: "0.3"
+      HAND_LOW_CONF_ZERO_THRESHOLD: "0.15"
       DET_INTERVAL: "5"
       TRACK_CROP_PADDING: "1.8"
       SMOOTHING_ENABLED: "true"
@@ -136,7 +137,7 @@ services:
       GESTURE_OFFSET_THRESHOLD: "0.03"
       GESTURE_ONSET_FRAMES: "3"
       GESTURE_OFFSET_FRAMES: "6"
-      GESTURE_HAND_PRESENCE_CONF: "0.3"
+      GESTURE_HAND_PRESENCE_CONF: "0.15"
       GESTURE_PREROLL_FRAMES: "5"
       GESTURE_MIN_FRAMES: "8"
       GESTURE_MAX_FRAMES: "150"
@@ -251,6 +252,11 @@ services:
       TTS_SERVICE_URL: http://tts-service:8004
       GATEWAY_SESSION_TTL: "300"
       GATEWAY_HTTP_TIMEOUT: "120"
+      # Sentence accumulation — buffer completed gestures and translate the
+      # whole sentence at once (T9-style disambiguation across positions)
+      # instead of calling the LLM after every single gesture.
+      SENTENCE_PAUSE_SECONDS: "2.5"
+      MAX_SENTENCE_GLOSSES: "8"
     depends_on:
       redis:
         condition: service_healthy

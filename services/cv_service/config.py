@@ -37,6 +37,20 @@ TRACK_CROP_PADDING = float(os.getenv("TRACK_CROP_PADDING", "1.8"))
 # existing _SkeletonPainter._minScore rendering cutoff.
 LOW_CONF_ZERO_THRESHOLD = float(os.getenv("LOW_CONF_ZERO_THRESHOLD", "0.3"))
 
+# Hands get their OWN, lower threshold. Live production logs showed
+# nonzero_kp dropping to ~15/75 mid-gesture — i.e. most of both hands zeroed
+# out during actual signing motion. RTMW is a single-shot per-frame model
+# with no temporal prior, so fast hand motion (motion blur) legitimately
+# lowers its confidence even when the hand IS genuinely there and roughly
+# correctly localized — unlike DWPose's separate hand detector, whose
+# "undetected" case is closer to true absence. 0.3 was tuned for "is this
+# joint absent", not "is this moving hand slightly less certain" — hands
+# are the entire signal for RSL, so we tolerate more per-frame noise on them
+# rather than lose them outright. Needs empirical tuning against real
+# camera footage (see scripts/analyze_cv_logs.py for the nonzero_kp/region
+# breakdown to calibrate this against).
+HAND_LOW_CONF_ZERO_THRESHOLD = float(os.getenv("HAND_LOW_CONF_ZERO_THRESHOLD", "0.15"))
+
 # One Euro Filter (keypoint_smoother.py) — adaptive temporal smoothing applied
 # before keypoints reach the classifier. mincutoff: baseline smoothing at
 # near-zero speed (lower = smoother when still). beta: how much fast motion
@@ -66,7 +80,12 @@ GESTURE_ONSET_FRAMES       = int(os.getenv("GESTURE_ONSET_FRAMES", "3"))
 # knob now only affects how soon the FINAL (corrected) result lands, not the
 # perceived responsiveness.
 GESTURE_OFFSET_FRAMES      = int(os.getenv("GESTURE_OFFSET_FRAMES", "6"))
-GESTURE_HAND_PRESENCE_CONF = float(os.getenv("GESTURE_HAND_PRESENCE_CONF", "0.3"))
+# Matches HAND_LOW_CONF_ZERO_THRESHOLD, not the old body threshold — this
+# checks mean confidence of the SAME (now less aggressively zeroed) hand
+# keypoints; leaving this at the old 0.3 would make the segmenter think
+# "no hands" even on frames the extractor now keeps as valid low-confidence
+# hand data, causing spurious offset-triggering mid-gesture.
+GESTURE_HAND_PRESENCE_CONF = float(os.getenv("GESTURE_HAND_PRESENCE_CONF", "0.15"))
 GESTURE_PREROLL_FRAMES     = int(os.getenv("GESTURE_PREROLL_FRAMES", "5"))
 GESTURE_MIN_FRAMES         = int(os.getenv("GESTURE_MIN_FRAMES", "8"))
 GESTURE_MAX_FRAMES         = int(os.getenv("GESTURE_MAX_FRAMES", "150"))

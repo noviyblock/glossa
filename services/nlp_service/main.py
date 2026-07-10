@@ -149,6 +149,36 @@ async def translate_topk(body: dict[str, Any]):
     return {"translation": translation, "cached": False, "latency_ms": latency_ms}
 
 
+# ── POST /translate_sequence_topk ─────────────────────────────────────────── #
+
+@app.post("/translate_sequence_topk")
+async def translate_sequence_topk(body: dict[str, Any]):
+    """Translate a whole buffered gesture sequence (sentence) in one call.
+
+    Body: {"positions": [[{"gloss": "Я", "prob": 0.9}, ...], ...],
+           "context": ["previous translated sentence", ...]}
+
+    Each element of `positions` is the top-k candidate list for one
+    recognised gesture, in temporal order — generalizes /translate_topk
+    (single gesture) to a full sentence: the LLM picks the most
+    linguistically coherent combination across positions instead of the
+    best candidate for each gesture in isolation. Always skips the cache —
+    a given set of per-position candidates is rarely repeated verbatim.
+    """
+    positions = body.get("positions", [])
+    context   = body.get("context") or []
+    if not positions:
+        return JSONResponse(status_code=400, content={"error": "positions list is empty"})
+
+    t0 = time.perf_counter()
+    translation = await asyncio.to_thread(_translator.translate_sequence_topk, positions, context)
+    latency_ms  = round((time.perf_counter() - t0) * 1000, 1)
+
+    logger.info("translate_sequence_topk latency=%.1fms n_positions=%d context_turns=%d",
+                latency_ms, len(positions), len(context))
+    return {"translation": translation, "cached": False, "latency_ms": latency_ms}
+
+
 # ── POST /translate_reverse ───────────────────────────────────────────────── #
 
 @app.post("/translate_reverse")

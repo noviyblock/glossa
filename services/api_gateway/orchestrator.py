@@ -27,7 +27,9 @@ import redis.asyncio as aioredis
 from config import (
     ASR_SERVICE_URL,
     CV_SERVICE_URL,
+    MAX_SENTENCE_GLOSSES,
     NLP_SERVICE_URL,
+    SENTENCE_PAUSE_SECONDS,
     SESSION_TTL,
     TTS_SERVICE_URL,
 )
@@ -79,12 +81,21 @@ class Orchestrator:
     # ── Pipeline: RSL → Text ──────────────────────────────────────────────── #
 
     async def process_frame(self, session_id: str, frame_b64: str) -> dict:
-        """Send one video frame through CV → NLP and return structured result.
+        """Send one video frame through CV and return structured result.
+
+        Completed gestures are NOT translated one at a time. Instead they're
+        buffered per session (`pending_positions`, one top-3 candidate list
+        per gesture) until a sentence boundary is detected — either a pause
+        of SENTENCE_PAUSE_SECONDS since the last gesture, or the buffer
+        reaching MAX_SENTENCE_GLOSSES — at which point the whole buffered
+        sequence is translated in one LLM call via /translate_sequence_topk.
+        This both cuts LLM calls (one per sentence, not per gesture) and
+        gives the LLM the full sentence to disambiguate against, T9-style.
 
         Returns:
             {
                 "glosses": [{"gloss": str, "prob": float}, ...],
-                "translation": str,
+                "translation": str,   # non-empty only on the frame that flushed a sentence
                 "confidence": float,
             }
         """
@@ -110,56 +121,56 @@ class Orchestrator:
         is_preview: bool = cv_data.get("preview", False)
 
         # Preview classifications (early, provisional — segment keeps
-        # accumulating) skip NLP translation and session persistence
-        # entirely: the point is fast raw-gloss feedback, not a final
-        # answer. Running the LLM on every preview would add seconds of
-        # latency right before the real result and could clobber
-        # last_translation/history with an empty/provisional value.
+        # accumulating) skip translation and session persistence entirely:
+        # the point is fast raw-gloss feedback, not a final answer. Running
+        # the LLM on every preview would add seconds of latency right before
+        # the real result and could clobber last_translation/history with an
+        # empty/provisional value.
         if is_preview:
             return {"glosses": glosses, "translation": "", "confidence": confidence,
                     "keypoints": keypoints, "person_detected": person_detected,
                     "gesture_active": gesture_active, "preview": True}
 
-        # Publish to cv:results stream for external consumers
-        await self._redis.xadd(
-            _STREAM_CV_RESULTS,
-            {"payload": json.dumps({"session_id": session_id, "glosses": glosses})},
-            maxlen=500, approximate=True,
-        )
+        if glosses:
+            await self._redis.xadd(
+                _STREAM_CV_RESULTS,
+                {"payload": json.dumps({"session_id": session_id, "glosses": glosses})},
+                maxlen=500, approximate=True,
+            )
 
-        # Skip NLP when confidence is too low — usually means no person in frame
-        # or random noise classified by the model.
+        # Skip buffering when confidence is too low — usually means no
+        # person in frame or random noise classified by the model.
         _MIN_CONFIDENCE = 0.15  # lowered for diagnostics; raise to 0.35+ in production
         _HISTORY_TURNS  = 2      # recent translated sentences given to the LLM as context
 
-        # 2. NLP service — translate glosses to Russian text, using recent
-        # conversation history so the LLM can disambiguate among the top-3
-        # candidates by semantic coherence, not just raw confidence.
         prior_session = await self._get_session(session_id) or {}
         history: list[str] = list(prior_session.get("history", []))
+        pending_positions: list[list[dict]] = list(prior_session.get("pending_positions", []))
+        last_gesture_ts: float = prior_session.get("last_gesture_ts", 0.0)
 
+        now = time.time()
         translation = ""
-        if glosses and confidence >= _MIN_CONFIDENCE:
-            try:
-                nlp_resp = await self._http.post(
-                    f"{NLP_SERVICE_URL}/translate_topk",
-                    json={"hypotheses": glosses, "context": history},
-                )
-                nlp_resp.raise_for_status()
-                translation = nlp_resp.json().get("translation", "")
-            except Exception as exc:
-                logger.error("NLP service error session=%s: %s", session_id, exc)
-                translation = glosses[0]["gloss"] if glosses else ""
 
-        # Publish to nlp:results stream
-        await self._redis.xadd(
-            _STREAM_NLP_RESULTS,
-            {"payload": json.dumps({"session_id": session_id, "translation": translation})},
-            maxlen=500, approximate=True,
-        )
+        if glosses and confidence >= _MIN_CONFIDENCE:
+            # A gesture just completed — buffer its top-3 candidates rather
+            # than translating it in isolation.
+            pending_positions.append(glosses)
+            last_gesture_ts = now
+            if len(pending_positions) >= MAX_SENTENCE_GLOSSES:
+                translation = await self._flush_sentence(session_id, pending_positions, history)
+                pending_positions = []
+        elif pending_positions and (now - last_gesture_ts) >= SENTENCE_PAUSE_SECONDS:
+            # No new gesture this frame, but the pause since the last one is
+            # long enough to treat the buffer as a finished sentence. This
+            # branch is what actually flushes most sentences in practice,
+            # since it's checked on every frame (not just gesture completions).
+            translation = await self._flush_sentence(session_id, pending_positions, history)
+            pending_positions = []
 
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-        logger.info("rsl_to_text latency=%.1fms session=%s", latency_ms, session_id)
+        if glosses or translation:
+            logger.info("rsl_to_text latency=%.1fms session=%s flushed=%s",
+                        latency_ms, session_id, bool(translation))
 
         # Persist session state, including a short rolling history for the
         # next call's context (only append non-empty, genuinely new turns).
@@ -167,13 +178,38 @@ class Orchestrator:
             history = (history + [translation])[-_HISTORY_TURNS:]
 
         await self._set_session(session_id, {
-            "mode": "rsl_to_text", "last_translation": translation,
-            "last_glosses": glosses, "latency_ms": latency_ms, "history": history,
+            "mode": "rsl_to_text",
+            "last_translation": translation or prior_session.get("last_translation", ""),
+            "last_glosses": glosses or prior_session.get("last_glosses", []),
+            "latency_ms": latency_ms, "history": history,
+            "pending_positions": pending_positions, "last_gesture_ts": last_gesture_ts,
         })
 
         return {"glosses": glosses, "translation": translation, "confidence": confidence,
                 "keypoints": keypoints, "person_detected": person_detected,
                 "gesture_active": gesture_active, "preview": False}
+
+    async def _flush_sentence(
+        self, session_id: str, pending_positions: list[list[dict]], history: list[str],
+    ) -> str:
+        """Translate a full buffered gesture sequence in one LLM call."""
+        try:
+            nlp_resp = await self._http.post(
+                f"{NLP_SERVICE_URL}/translate_sequence_topk",
+                json={"positions": pending_positions, "context": history},
+            )
+            nlp_resp.raise_for_status()
+            translation = nlp_resp.json().get("translation", "")
+        except Exception as exc:
+            logger.error("NLP sequence translate error session=%s: %s", session_id, exc)
+            translation = " ".join(p[0]["gloss"] for p in pending_positions if p)
+
+        await self._redis.xadd(
+            _STREAM_NLP_RESULTS,
+            {"payload": json.dumps({"session_id": session_id, "translation": translation})},
+            maxlen=500, approximate=True,
+        )
+        return translation
 
     # ── Pipeline: Text → RSL ──────────────────────────────────────────────── #
 

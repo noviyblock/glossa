@@ -6,6 +6,7 @@ import numpy as np
 
 from config import (
     DET_INTERVAL,
+    HAND_LOW_CONF_ZERO_THRESHOLD,
     LOW_CONF_ZERO_THRESHOLD,
     RTMLIB_DEVICE,
     RTMLIB_MODE,
@@ -71,8 +72,9 @@ def _remap_coco133_to_75(kp133: np.ndarray) -> np.ndarray:
     feet6      = _zero_low_confidence_joints(kp133[17:23])
     extra10    = body17[_EXTRA_JOINT_SRC]  # derived from already-zeroed body17
     pose33     = np.concatenate([body17, feet6, extra10], axis=0)
-    left_hand  = _zero_low_confidence_joints(kp133[91:112])
-    right_hand = _zero_low_confidence_joints(kp133[112:133])
+    # Hands use their own, lower threshold — see HAND_LOW_CONF_ZERO_THRESHOLD.
+    left_hand  = _zero_low_confidence_joints(kp133[91:112],  threshold=HAND_LOW_CONF_ZERO_THRESHOLD)
+    right_hand = _zero_low_confidence_joints(kp133[112:133], threshold=HAND_LOW_CONF_ZERO_THRESHOLD)
     return np.concatenate([pose33, left_hand, right_hand], axis=0).astype(np.float32)
 
 
@@ -219,17 +221,38 @@ class KeypointExtractor:
 
     @staticmethod
     def _update_tracked_bbox(track: TrackState, kp: np.ndarray, sc: np.ndarray, w: int, h: int) -> None:
-        """Refresh `track.bbox` from this frame's confidently-detected
-        keypoints (full-frame pixel coords), for next call's crop."""
+        """Grow `track.bbox` to include this frame's confidently-detected
+        keypoints (full-frame pixel coords), for next call's crop.
+
+        Deliberately a UNION with the previous bbox, not a replacement.
+        Replacing it every call created a feedback loop: a hand swung out
+        mid-gesture whose confidence dips below threshold (fast motion —
+        rtmlib is a single-shot per-frame model, no temporal smoothing of
+        its own) would drop out of THIS frame's confident-point set, so the
+        recomputed bbox would shrink to exclude it — and the NEXT (cropped,
+        non-full-frame) call would then not even show rtmlib that region of
+        the image, guaranteeing it stays low/zero for up to DET_INTERVAL-1
+        more frames. Only growing the box between full-frame redetects (which
+        happen unconditionally every DET_INTERVAL calls and reset the box
+        from scratch) fixes this while still bounding how large the crop can
+        get.
+        """
         valid = sc >= LOW_CONF_ZERO_THRESHOLD
         if not valid.any():
-            track.bbox = None
-            return
+            return  # keep the existing bbox rather than dropping tracking entirely
         xs, ys = kp[valid, 0], kp[valid, 1]
-        track.bbox = np.array(
+        new_bbox = np.array(
             [max(xs.min(), 0), max(ys.min(), 0), min(xs.max(), w), min(ys.max(), h)],
             dtype=np.float32,
         )
+        if track.bbox is None:
+            track.bbox = new_bbox
+        else:
+            track.bbox = np.array(
+                [min(track.bbox[0], new_bbox[0]), min(track.bbox[1], new_bbox[1]),
+                 max(track.bbox[2], new_bbox[2]), max(track.bbox[3], new_bbox[3])],
+                dtype=np.float32,
+            )
 
     def close(self) -> None:
         pass

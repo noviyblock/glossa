@@ -154,10 +154,20 @@ async def process_frame(body: dict[str, Any]):
         # for empirical threshold tuning (see GESTURE_* constants in config.py).
         _diag_counters[session_id] = _diag_counters.get(session_id, 0) + 1
         if _diag_counters[session_id] % 30 == 0:
-            nonzero = int(np.count_nonzero(kp[:, 0]))
+            # Per-region breakdown, not just a combined total — the combined
+            # number alone can't tell you whether it's the whole person
+            # dropping out (bad framing/lighting/distance) or specifically
+            # the hands during motion (see HAND_LOW_CONF_ZERO_THRESHOLD).
+            # scripts/analyze_cv_logs.py parses this exact "kp=body:.. lhand:..
+            # rhand:.." format — keep them in sync if this line changes.
+            body_nz  = int(np.count_nonzero(kp[0:33, 0]))
+            lhand_nz = int(np.count_nonzero(kp[33:54, 0]))
+            rhand_nz = int(np.count_nonzero(kp[54:75, 0]))
             logger.info(
-                "DIAG session=%s %s size=%dx%d person=%s nonzero_kp=%d/75",
-                session_id[:8], seg.debug_state, w, h, person_detected, nonzero,
+                "DIAG session=%s %s size=%dx%d person=%s "
+                "kp=body:%d/33 lhand:%d/21 rhand:%d/21 total:%d/75",
+                session_id[:8], seg.debug_state, w, h, person_detected,
+                body_nz, lhand_nz, rhand_nz, body_nz + lhand_nz + rhand_nz,
             )
 
         window, gesture_active, is_preview = seg.push(kp)

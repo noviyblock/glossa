@@ -40,6 +40,28 @@ TOPK_SYSTEM_PROMPT = (
     "Только перевод, без пояснений."
 )
 
+# Sequence-level ("T9-style") disambiguation: instead of picking the best
+# candidate for one gesture in isolation, pick the most coherent combination
+# across an entire buffered sentence of gestures at once.
+SEQ_TOPK_SYSTEM_PROMPT = (
+    "Ты — переводчик русского жестового языка (РЖЯ) в русский текст. \n"
+    "Тебе даётся последовательность позиций — одна на каждый распознанный "
+    "жест, по порядку. Для каждой позиции распознаватель предлагает "
+    "несколько вариантов глоссы с вероятностями — распознавание не идеально: "
+    "правильный вариант не всегда тот, что с наибольшей вероятностью, а "
+    "иногда жест мог быть распознан ошибочно или пропущен. \n"
+    "Выбери наиболее связную по смыслу последовательность вариантов "
+    "(учитывая порядок SOV и общий смысл всего предложения, а не каждую "
+    "позицию по отдельности) и переведи её в грамматически правильное "
+    "русское предложение. Если какая-то позиция явно не вписывается по "
+    "смыслу ни одним из вариантов, можешь её проигнорировать, если без неё "
+    "предложение получается более естественным. \n"
+    "Если дан контекст (предыдущие фразы диалога), используй его для "
+    "связности с разговором. \n"
+    "ВАЖНО: отвечай ТОЛЬКО на русском языке. \n"
+    "Только перевод, без пояснений."
+)
+
 # Reverse: Russian text → RSL gloss sequence
 REVERSE_SYSTEM_PROMPT = (
     "Ты — переводчик русского жестового языка (РЖЯ). "
@@ -132,3 +154,22 @@ class Translator:
     def translate_reverse(self, russian_text: str) -> str:
         """Russian sentence → RSL gloss sequence (SOV, uppercase)."""
         return self.generate(REVERSE_SYSTEM_PROMPT, russian_text)
+
+    def translate_sequence_topk(
+        self, positions: list[list[dict]], context: list[str] | None = None
+    ) -> str:
+        """Translate a whole buffered sentence of gestures at once.
+
+        `positions` is a list of top-k candidate lists, one per recognised
+        gesture in temporal order — generalizes translate_topk (single
+        gesture) to a full sentence so the LLM can disambiguate using the
+        whole sequence's coherence rather than one gesture in isolation.
+        """
+        lines = "\n".join(
+            f"Позиция {i + 1}: " + ", ".join(f"{h['gloss']} ({h['prob']:.2f})" for h in pos)
+            for i, pos in enumerate(positions)
+        )
+        if context:
+            ctx = "\n".join(context[-2:])
+            lines = f"Предыдущие фразы диалога:\n{ctx}\n\nПозиции распознанных жестов:\n{lines}"
+        return self.generate(SEQ_TOPK_SYSTEM_PROMPT, lines)
