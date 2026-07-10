@@ -18,17 +18,36 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-FROM base AS deps
+# ── CPU build ─────────────────────────────────────────────────────────────────
+FROM base AS deps-cpu
 COPY pyproject.toml .
+RUN --mount=type=cache,target=/root/.cache/pip pip install "onnxruntime>=1.18"
 RUN --mount=type=cache,target=/root/.cache/pip pip install .
 
-FROM deps AS development
+# ── GPU build (CUDA 12.x) ────────────────────────────────────────────────────
+# The ST-GCN classifier (gesture_classifier.py) stays on OpenVINO/CPU always
+# — it's tiny (~10ms P95 already). The GPU build targets the actual
+# bottleneck: rtmlib's RTMDet-nano+RTMW keypoint extraction, ~90ms/frame on
+# CPU and the dominant cost in the per-frame latency budget. onnxruntime-gpu
+# needs CUDA/cuDNN runtime libs; rather than an nvidia/cuda base image, they
+# come from pip (nvidia-* wheels) — the container only needs the NVIDIA
+# *driver* via nvidia-container-toolkit on the host (already required for
+# nlp/asr/tts GPU builds), not a system CUDA toolkit install.
+FROM base AS deps-gpu
+COPY pyproject.toml .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "onnxruntime-gpu>=1.18" "nvidia-cudnn-cu12>=9,<10" \
+        "nvidia-cuda-runtime-cu12" "nvidia-cublas-cu12"
+RUN --mount=type=cache,target=/root/.cache/pip pip install .
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib
+
+FROM deps-cpu AS development
 COPY . .
 USER glossa
 EXPOSE 8001
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
 
-FROM deps AS production
+FROM deps-cpu AS production
 COPY . .
 RUN chown -R glossa:glossa /app \
     && mkdir -p /home/glossa/.rtmlib \
@@ -40,10 +59,15 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", \
      "--workers", "1", "--loop", "uvloop"]
 
-FROM production AS production-gpu
-# GestureClassifier always compiles OpenVINO for "CPU" — the ST-GCN model is
-# tiny, ~10ms P95 on OpenVINO INT8/CPU. No GPU path exists in code (OpenVINO
-# is already in the base `production` image's dependencies; this stage is
-# kept only for compose-file compatibility). onnxruntime-gpu pulls a CUDA
-# version that may not match the host driver/runtime for zero actual benefit
-# — skip it.
+FROM deps-gpu AS production-gpu
+COPY . .
+RUN chown -R glossa:glossa /app \
+    && mkdir -p /home/glossa/.rtmlib \
+    && chown -R glossa:glossa /home/glossa/.rtmlib
+USER glossa
+EXPOSE 8001
+ENV RTMLIB_DEVICE=cuda
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8001/health/live || exit 1
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", \
+     "--workers", "1", "--loop", "uvloop"]

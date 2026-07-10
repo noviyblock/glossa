@@ -6,8 +6,13 @@ services:
     build:
       target: production-gpu
     environment:
-      - CV_DEVICE=GPU
-      - CV_MODEL_BACKEND=openvino
+      # RTMLIB_DEVICE is the real config knob (see cv_service/config.py) —
+      # CV_DEVICE/CV_MODEL_BACKEND previously here didn't map to anything in
+      # the code and silently had no effect (extraction stayed on CPU).
+      # 'balanced' rtmlib mode (more accurate hand/finger localization than
+      # 'lightweight') is affordable now that extraction is GPU-accelerated.
+      - RTMLIB_DEVICE=cuda
+      - RTMLIB_MODE=balanced
     deploy:
       resources:
         reservations:
