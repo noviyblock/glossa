@@ -35,10 +35,19 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install .
 # nlp/asr/tts GPU builds), not a system CUDA toolkit install.
 FROM base AS deps-gpu
 COPY pyproject.toml .
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install "onnxruntime-gpu>=1.18" "nvidia-cudnn-cu12>=9,<10" \
-        "nvidia-cuda-runtime-cu12" "nvidia-cublas-cu12"
+# `pip install .` pulls in rtmlib's OWN transitive dependency on plain
+# `onnxruntime` (CPU) — it and `onnxruntime-gpu` both occupy the same
+# `onnxruntime/` import path, so whichever installs LAST wins the shared
+# library that's actually loaded. Installing the GPU wheel first and letting
+# `pip install .` run after it silently clobbers it back to CPU (confirmed:
+# CUDAExecutionProvider missing entirely from the available-providers list
+# at runtime, not just failing to initialize). Fix: force-reinstall the GPU
+# wheel as the LAST step, after every other dependency is resolved.
 RUN --mount=type=cache,target=/root/.cache/pip pip install .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip uninstall -y onnxruntime; \
+    pip install "nvidia-cudnn-cu12>=9,<10" "nvidia-cuda-runtime-cu12" "nvidia-cublas-cu12" && \
+    pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.18"
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib
 
 FROM deps-cpu AS development
