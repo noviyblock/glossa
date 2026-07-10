@@ -44,10 +44,17 @@ COPY pyproject.toml .
 # at runtime, not just failing to initialize). Fix: force-reinstall the GPU
 # wheel as the LAST step, after every other dependency is resolved.
 RUN --mount=type=cache,target=/root/.cache/pip pip install .
+# Pinned <1.21: unbounded `onnxruntime-gpu>=1.18` resolved to a release that
+# wants libcudart.so.13 (CUDA 13) at runtime, which doesn't match the CUDA 12
+# nvidia-*-cu12 libs below (or the host driver, only confirmed compatible up
+# to CUDA 12.1 via nlp-service's torch-cu121 build) — confirmed via
+# `ImportError: libcudart.so.13: cannot open shared object file` in
+# production. Keep on the CUDA 12 / cuDNN 9 line until the host driver is
+# confirmed to support CUDA 13.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip uninstall -y onnxruntime; \
     pip install "nvidia-cudnn-cu12>=9,<10" "nvidia-cuda-runtime-cu12" "nvidia-cublas-cu12" && \
-    pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.18"
+    pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.18,<1.21"
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib
 
 FROM deps-cpu AS development
