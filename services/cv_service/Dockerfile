@@ -53,9 +53,14 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install .
 # confirmed to support CUDA 13.
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip uninstall -y onnxruntime; \
-    pip install "nvidia-cudnn-cu12>=9,<10" "nvidia-cuda-runtime-cu12" "nvidia-cublas-cu12" && \
+    pip install "nvidia-cudnn-cu12>=9,<10" "nvidia-cuda-runtime-cu12" "nvidia-cublas-cu12" \
+        "nvidia-curand-cu12" "nvidia-cufft-cu12" && \
     pip install --force-reinstall --no-deps "onnxruntime-gpu>=1.18,<1.21"
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib
+# onnxruntime's CUDA EP dlopen's these directly (not via RPATH), so they all
+# need to be on LD_LIBRARY_PATH explicitly — cudart/cublas/cudnn alone got it
+# loading but still missing libcurand.so.10 in production; add curand/cufft
+# up front rather than discover the next missing one at runtime again.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cufft/lib
 
 FROM deps-cpu AS development
 COPY . .
