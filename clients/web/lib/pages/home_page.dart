@@ -72,6 +72,12 @@ class _HomePageState extends State<HomePage> {
   String? _lastRslText;
   DateTime? _lastRslAt;
 
+  // Buffered gesture sequence not yet sent to the LLM (server auto-flushes
+  // after SENTENCE_PAUSE_SECONDS of silence, but the user can also correct
+  // it directly — see _sendWsControl). Each entry is that gesture's top-3
+  // candidates; only the top-1 is shown as a chip.
+  List<List<_GlossItem>> _pendingPositions = [];
+
   // ── Text → RSL REST ───────────────────────────────────────────────────────── //
   final _textCtrl = TextEditingController();
   bool _ttsProcessing = false;
@@ -262,6 +268,17 @@ class _HomePageState extends State<HomePage> {
         }
         break;
 
+      case 'pending_sentence':
+        final rawPositions = payload['positions'] as List<dynamic>? ?? [];
+        setState(() {
+          _pendingPositions = rawPositions.map((pos) {
+            return (pos as List<dynamic>)
+                .map((g) => _GlossItem(g['gloss'] as String, (g['prob'] as num).toDouble()))
+                .toList();
+          }).toList();
+        });
+        break;
+
       case 'audio':
         setState(() => _rslAudio = payload['wav'] as String? ?? '');
         _playAudio(_rslAudio);
@@ -311,6 +328,17 @@ class _HomePageState extends State<HomePage> {
     if (base64Wav.isEmpty) return;
     (web.HTMLAudioElement()..src = 'data:audio/wav;base64,$base64Wav').play();
   }
+
+  // Manual sentence-buffer controls — bypass the SENTENCE_PAUSE_SECONDS
+  // auto-flush fallback (see orchestrator.py::flush_pending_sentence /
+  // delete_last_pending). No-ops if the RSL WS isn't connected.
+  void _sendWsControl(String type) {
+    if (_rslStatus != _WsStatus.connected || _rslWs == null) return;
+    _rslWs!.sink.add(jsonEncode({'type': type, 'session_id': _sessionId}));
+  }
+
+  void _flushPendingSentence() => _sendWsControl('flush_sentence');
+  void _deleteLastPendingGesture() => _sendWsControl('delete_last_gesture');
 
   void _scrollToBottom(ScrollController ctrl) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -569,6 +597,46 @@ class _HomePageState extends State<HomePage> {
     children: [
       _PanelHeader(icon: Icons.hearing, label: 'Распознанные жесты',
           color: cs.tertiary, bg: cs.tertiaryContainer.withValues(alpha: 0.5)),
+      // Накопленное, ещё не отправленное в LLM предложение. Сервер сам
+      // отправит его после паузы (SENTENCE_PAUSE_SECONDS), но можно
+      // поправить/отправить раньше вручную — на случай если распознавание
+      // ошиблось или пользователь просто не хочет ждать паузы.
+      if (_pendingPositions.isNotEmpty)
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          color: cs.tertiaryContainer.withValues(alpha: 0.25),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Wrap(
+              spacing: 4, runSpacing: 4,
+              children: _pendingPositions.asMap().entries.map((e) {
+                final isLast = e.key == _pendingPositions.length - 1;
+                final top1 = e.value.first;
+                return Chip(
+                  label: Text(top1.gloss, style: const TextStyle(fontSize: 12)),
+                  backgroundColor: cs.tertiaryContainer,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  onDeleted: isLast ? _deleteLastPendingGesture : null,
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.tonalIcon(
+                onPressed: _flushPendingSentence,
+                icon: const Icon(Icons.send, size: 14),
+                label: const Text('Отправить сейчас', style: TextStyle(fontSize: 12)),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ),
+          ]),
+        ),
       Expanded(
         child: _rslMsgs.isEmpty
             ? _EmptyState(icon: Icons.sign_language,

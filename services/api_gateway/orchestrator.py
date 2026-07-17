@@ -46,6 +46,11 @@ _STREAM_NLP_RESULTS = "nlp:results"
 _CONSUMER_GROUP     = "api-gateway"
 _CONSUMER_NAME      = "gateway-0"
 
+# Skip buffering when confidence is too low — usually means no person in
+# frame or random noise classified by the model.
+_MIN_CONFIDENCE = 0.15  # lowered for diagnostics; raise to 0.35+ in production
+_HISTORY_TURNS  = 2      # recent translated sentences given to the LLM as context
+
 
 class Orchestrator:
     def __init__(self, redis: aioredis.Redis, http: httpx.AsyncClient) -> None:
@@ -92,11 +97,18 @@ class Orchestrator:
         This both cuts LLM calls (one per sentence, not per gesture) and
         gives the LLM the full sentence to disambiguate against, T9-style.
 
+        Auto-flush is a fallback, not the only way a sentence ends — the
+        client can also trigger flush_pending_sentence()/delete_last_pending()
+        explicitly (see api_gateway/main.py's "flush_sentence"/
+        "delete_last_gesture" WS messages) so a user who notices a
+        misrecognized gesture isn't stuck waiting for the pause timer.
+
         Returns:
             {
                 "glosses": [{"gloss": str, "prob": float}, ...],
                 "translation": str,   # non-empty only on the frame that flushed a sentence
                 "confidence": float,
+                "pending_positions": list[list[dict]],  # only present when the buffer changed this frame
             }
         """
         t0 = time.perf_counter()
@@ -138,11 +150,6 @@ class Orchestrator:
                 maxlen=500, approximate=True,
             )
 
-        # Skip buffering when confidence is too low — usually means no
-        # person in frame or random noise classified by the model.
-        _MIN_CONFIDENCE = 0.15  # lowered for diagnostics; raise to 0.35+ in production
-        _HISTORY_TURNS  = 2      # recent translated sentences given to the LLM as context
-
         prior_session = await self._get_session(session_id) or {}
         history: list[str] = list(prior_session.get("history", []))
         pending_positions: list[list[dict]] = list(prior_session.get("pending_positions", []))
@@ -150,22 +157,26 @@ class Orchestrator:
 
         now = time.time()
         translation = ""
+        pending_changed = False
 
         if glosses and confidence >= _MIN_CONFIDENCE:
             # A gesture just completed — buffer its top-3 candidates rather
             # than translating it in isolation.
             pending_positions.append(glosses)
             last_gesture_ts = now
+            pending_changed = True
             if len(pending_positions) >= MAX_SENTENCE_GLOSSES:
                 translation = await self._flush_sentence(session_id, pending_positions, history)
                 pending_positions = []
         elif pending_positions and (now - last_gesture_ts) >= SENTENCE_PAUSE_SECONDS:
             # No new gesture this frame, but the pause since the last one is
-            # long enough to treat the buffer as a finished sentence. This
-            # branch is what actually flushes most sentences in practice,
-            # since it's checked on every frame (not just gesture completions).
+            # long enough to treat the buffer as a finished sentence. This is
+            # the FALLBACK path — most useful when the user isn't actively
+            # watching/correcting the buffer; a client that IS watching can
+            # pre-empt this via flush_pending_sentence()/delete_last_pending().
             translation = await self._flush_sentence(session_id, pending_positions, history)
             pending_positions = []
+            pending_changed = True
 
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         if glosses or translation:
@@ -185,9 +196,12 @@ class Orchestrator:
             "pending_positions": pending_positions, "last_gesture_ts": last_gesture_ts,
         })
 
-        return {"glosses": glosses, "translation": translation, "confidence": confidence,
-                "keypoints": keypoints, "person_detected": person_detected,
-                "gesture_active": gesture_active, "preview": False}
+        result = {"glosses": glosses, "translation": translation, "confidence": confidence,
+                  "keypoints": keypoints, "person_detected": person_detected,
+                  "gesture_active": gesture_active, "preview": False}
+        if pending_changed:
+            result["pending_positions"] = pending_positions
+        return result
 
     async def _flush_sentence(
         self, session_id: str, pending_positions: list[list[dict]], history: list[str],
@@ -210,6 +224,43 @@ class Orchestrator:
             maxlen=500, approximate=True,
         )
         return translation
+
+    async def flush_pending_sentence(self, session_id: str) -> dict:
+        """Explicit client-triggered "send now" — flushes pending_positions
+        immediately, bypassing SENTENCE_PAUSE_SECONDS. No-op (empty
+        translation) if the buffer is already empty.
+
+        Returns: {"translation": str, "pending_positions": []}
+        """
+        session = await self._get_session(session_id) or {}
+        pending_positions: list[list[dict]] = list(session.get("pending_positions", []))
+        history: list[str] = list(session.get("history", []))
+
+        if not pending_positions:
+            return {"translation": "", "pending_positions": []}
+
+        translation = await self._flush_sentence(session_id, pending_positions, history)
+        if translation and (not history or history[-1] != translation):
+            history = (history + [translation])[-_HISTORY_TURNS:]
+
+        await self._set_session(session_id, {
+            **session,
+            "last_translation": translation,
+            "history": history,
+            "pending_positions": [],
+        })
+        return {"translation": translation, "pending_positions": []}
+
+    async def delete_last_pending(self, session_id: str) -> list[list[dict]]:
+        """User-initiated correction: drop the most recently buffered
+        gesture (e.g. it was misrecognized). Returns the updated buffer so
+        the caller can echo it back to the client."""
+        session = await self._get_session(session_id) or {}
+        pending_positions: list[list[dict]] = list(session.get("pending_positions", []))
+        if pending_positions:
+            pending_positions.pop()
+        await self._set_session(session_id, {**session, "pending_positions": pending_positions})
+        return pending_positions
 
     # ── Pipeline: Text → RSL ──────────────────────────────────────────────── #
 

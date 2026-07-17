@@ -170,17 +170,27 @@ async def ws_translate(ws: WebSocket, mode: str):
     Client → server:
         {"type": "video_frame", "frame": "<base64>",       "session_id": "uuid"}
         {"type": "audio_chunk", "audio": "<base64 PCM>",   "session_id": "uuid"}
+        {"type": "flush_sentence",      "session_id": "uuid"}  # rsl_to_text: send buffered gestures now
+        {"type": "delete_last_gesture", "session_id": "uuid"}  # rsl_to_text: drop last buffered gesture
         {"type": "end_session", "session_id": "uuid"}
 
     Server → client:
         {"type": "gloss",   "payload": {"glosses": [...], "confidence": 0.85,
                                          "gesture_active": bool, "preview": bool},
                                                                                 "session_id": "..."}
+        {"type": "pending_sentence", "payload": {"positions": [[{"gloss","prob"},...],...]},
+                                                                                "session_id": "..."}
         {"type": "chunk",   "payload": {"text": str, "is_final": false},        "session_id": "..."}
         {"type": "result",  "payload": {"text": str, "confidence": float},      "session_id": "..."}
         {"type": "audio",   "payload": {"wav": "<base64>"},                     "session_id": "..."}
         {"type": "video",   "payload": {"video": "<base64 mp4>"},               "session_id": "..."}
         {"type": "error",   "payload": {"message": str},                        "session_id": "..."}
+
+    `pending_sentence` is sent whenever the buffered-gesture-sequence changes
+    (a gesture was appended, or the buffer just flushed) — the client uses it
+    to render "sentence so far" chips and lets the user correct/send early
+    via flush_sentence/delete_last_gesture instead of only waiting for the
+    SENTENCE_PAUSE_SECONDS auto-flush fallback (see orchestrator.py::process_frame).
     """
     if mode not in ("rsl_to_text", "text_to_rsl"):
         await ws.close(code=4000, reason=f"unknown mode: {mode}")
@@ -233,6 +243,24 @@ async def ws_translate(ws: WebSocket, mode: str):
                 if translation:
                     await _send("chunk", {"text": translation, "is_final": False})
                     await _send("result", {"text": translation, "confidence": confidence})
+
+                # 3. Buffered-sentence state, only when it actually changed
+                # this frame (gesture appended, or buffer just auto-flushed)
+                if "pending_positions" in result:
+                    await _send("pending_sentence", {"positions": result["pending_positions"]})
+
+            # ── RSL → Text: manual sentence controls ──────────────────────── #
+            elif msg_type == "flush_sentence" and mode == "rsl_to_text":
+                flush_result = await _orchestrator.flush_pending_sentence(session_id)
+                translation = flush_result["translation"]
+                if translation:
+                    await _send("chunk", {"text": translation, "is_final": False})
+                    await _send("result", {"text": translation, "confidence": 1.0})
+                await _send("pending_sentence", {"positions": flush_result["pending_positions"]})
+
+            elif msg_type == "delete_last_gesture" and mode == "rsl_to_text":
+                positions = await _orchestrator.delete_last_pending(session_id)
+                await _send("pending_sentence", {"positions": positions})
 
             # ── Text → RSL ─────────────────────────────────────────────── #
             elif msg_type == "audio_chunk" and mode == "text_to_rsl":

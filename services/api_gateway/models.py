@@ -21,6 +21,14 @@ class WsEndSession(BaseModel):
     type: Literal["end_session"]
     session_id: str
 
+class WsFlushSentence(BaseModel):
+    type: Literal["flush_sentence"]
+    session_id: str
+
+class WsDeleteLastGesture(BaseModel):
+    type: Literal["delete_last_gesture"]
+    session_id: str
+
 
 # ── Outgoing WebSocket messages (gateway → client) ────────────────────────── #
 
@@ -48,6 +56,11 @@ class WsVideo(BaseModel):
     type: Literal["video"] = "video"
     session_id: str
     payload: dict[str, Any]             # {"video": base64 | None}
+
+class WsPendingSentence(BaseModel):
+    type: Literal["pending_sentence"] = "pending_sentence"
+    session_id: str
+    payload: dict[str, Any]             # {"positions": [[{"gloss","prob"},...],...]}
 
 class WsError(BaseModel):
     type: Literal["error"] = "error"
