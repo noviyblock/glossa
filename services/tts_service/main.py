@@ -11,19 +11,22 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from synthesizer import Synthesizer
+from video import SignVideoAssembler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger("tts_service")
 
 _synthesizer: Synthesizer | None = None
+_video: SignVideoAssembler | None = None
 _ready = False
 _START = time.time()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _synthesizer, _ready
+    global _synthesizer, _video, _ready
     _synthesizer = Synthesizer()
+    _video = SignVideoAssembler()
     _ready = True
     yield
 
@@ -123,3 +126,34 @@ async def synthesize(body: dict):
         latency_ms, was_cached, speaker, text[:60],
     )
     return {"audio": audio_b64, "cached": was_cached, "latency_ms": latency_ms}
+
+
+# ── POST /sign_video ──────────────────────────────────────────────────────── #
+
+@app.post("/sign_video")
+async def sign_video(body: dict):
+    """Render a gloss sequence as a video of concatenated reference sign clips.
+
+    Body:     {"gloss_sequence": "ПРИВЕТ КАК ДЕЛА"}
+    Response: {"video": "<base64 MP4>" | null, "total": int, "latency_ms": float}
+
+    `video` is null if none of the glosses in the sequence had a matching
+    clip on disk (see SignVideoAssembler — best-effort normalized matching,
+    not a guaranteed hit).
+    """
+    gloss_sequence = body.get("gloss_sequence", "").strip()
+    if not gloss_sequence:
+        return JSONResponse(status_code=400, content={"error": "gloss_sequence is empty"})
+
+    total = len(gloss_sequence.split())
+
+    t0 = time.perf_counter()
+    video_bytes = await asyncio.to_thread(_video.build, gloss_sequence)
+    latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    video_b64 = base64.b64encode(video_bytes).decode() if video_bytes else None
+    logger.info(
+        "sign_video latency=%.1fms matched=%s gloss_sequence=%r",
+        latency_ms, video_b64 is not None, gloss_sequence[:60],
+    )
+    return {"video": video_b64, "total": total, "latency_ms": latency_ms}

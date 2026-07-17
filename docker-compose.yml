@@ -226,6 +226,7 @@ services:
       TORCH_HOME: /torch_cache
     volumes:
       - ./models:/models:ro
+      - ./data:/data:ro
       - torch-cache:/torch_cache
     depends_on:
       redis:

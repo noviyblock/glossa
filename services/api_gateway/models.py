@@ -44,6 +44,11 @@ class WsAudio(BaseModel):
     session_id: str
     payload: dict[str, Any]             # {"wav": base64}
 
+class WsVideo(BaseModel):
+    type: Literal["video"] = "video"
+    session_id: str
+    payload: dict[str, Any]             # {"video": base64 | None}
+
 class WsError(BaseModel):
     type: Literal["error"] = "error"
     session_id: str
@@ -64,5 +69,6 @@ class TranslateResponse(BaseModel):
     translation: str
     glosses: list[dict] | None = None
     audio_wav: str | None = None        # base64 WAV (text_to_rsl only)
+    video_mp4: str | None = None        # base64 MP4, sign clips (text_to_rsl only)
     latency_ms: float
     cached: bool = False

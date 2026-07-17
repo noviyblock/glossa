@@ -221,6 +221,7 @@ class Orchestrator:
                 "text": str,          # recognised Russian text
                 "gloss_sequence": str,  # RSL gloss sequence
                 "wav_b64": str,       # base64 WAV from TTS
+                "video_b64": str | None,  # base64 MP4 sign clips (None if no glosses matched)
             }
         """
         t0 = time.perf_counter()
@@ -279,6 +280,22 @@ class Orchestrator:
             except Exception as exc:
                 logger.warning("TTS service error session=%s: %s", session_id, exc)
 
+        # 4. TTS service — render gloss_sequence as concatenated sign clips.
+        # None (not "") when no glosses matched a clip — distinguishable from
+        # "not attempted" so the client can tell "no visual available" apart
+        # from a service error.
+        video_b64: str | None = None
+        if gloss_sequence:
+            try:
+                video_resp = await self._http.post(
+                    f"{TTS_SERVICE_URL}/sign_video",
+                    json={"gloss_sequence": gloss_sequence},
+                )
+                video_resp.raise_for_status()
+                video_b64 = video_resp.json().get("video")
+            except Exception as exc:
+                logger.warning("TTS sign_video error session=%s: %s", session_id, exc)
+
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         logger.info("text_to_rsl latency=%.1fms session=%s", latency_ms, session_id)
 
@@ -287,7 +304,8 @@ class Orchestrator:
             "last_gloss_sequence": gloss_sequence, "latency_ms": latency_ms,
         })
 
-        return {"text": russian_text, "gloss_sequence": gloss_sequence, "wav_b64": wav_b64}
+        return {"text": russian_text, "gloss_sequence": gloss_sequence,
+                "wav_b64": wav_b64, "video_b64": video_b64}
 
     # ── Synchronous REST orchestration ────────────────────────────────────── #
 
@@ -332,9 +350,23 @@ class Orchestrator:
                 json={"text": text, "speaker": "xenia"},
             )
             tts_resp.raise_for_status()
+            # And render the gloss sequence as concatenated sign clips —
+            # best-effort, None if nothing matched (see SignVideoAssembler).
+            video_b64: str | None = None
+            if gloss_seq:
+                try:
+                    video_resp = await self._http.post(
+                        f"{TTS_SERVICE_URL}/sign_video",
+                        json={"gloss_sequence": gloss_seq},
+                    )
+                    video_resp.raise_for_status()
+                    video_b64 = video_resp.json().get("video")
+                except Exception as exc:
+                    logger.warning("TTS sign_video error session=%s: %s", session_id, exc)
             return {
                 "translation": gloss_seq,
                 "audio_wav": tts_resp.json().get("audio", ""),
+                "video_mp4": video_b64,
                 "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
             }
 

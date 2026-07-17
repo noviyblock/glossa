@@ -76,6 +76,10 @@ class _HomePageState extends State<HomePage> {
   final _textCtrl = TextEditingController();
   bool _ttsProcessing = false;
   final List<_Msg> _glossMsgs = [];
+  // Concatenated sign-clip video for the latest text_to_rsl translation —
+  // null if none of the glosses matched a reference clip (see
+  // services/tts_service/video.py::SignVideoAssembler).
+  String? _signVideoB64;
   final _glossScrollCtrl = ScrollController();
 
   final _sessionId = const Uuid().v4();
@@ -263,6 +267,11 @@ class _HomePageState extends State<HomePage> {
         _playAudio(_rslAudio);
         break;
 
+      case 'video':
+        final videoB64 = payload['video'] as String?;
+        setState(() => _signVideoB64 = (videoB64 != null && videoB64.isNotEmpty) ? videoB64 : null);
+        break;
+
       case 'error':
         setState(() => _rslStatus = _WsStatus.error);
         break;
@@ -284,8 +293,12 @@ class _HomePageState extends State<HomePage> {
       );
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
       final glosses = data['translation'] as String? ?? '';
+      final videoB64 = data['video_mp4'] as String?;
       if (glosses.isNotEmpty && mounted) {
-        setState(() => _glossMsgs.add(_Msg(glosses)));
+        setState(() {
+          _glossMsgs.add(_Msg(glosses));
+          _signVideoB64 = (videoB64 != null && videoB64.isNotEmpty) ? videoB64 : null;
+        });
         _scrollToBottom(_glossScrollCtrl);
       }
     } catch (_) {
@@ -528,6 +541,13 @@ class _HomePageState extends State<HomePage> {
     children: [
       _PanelHeader(icon: Icons.sign_language, label: 'Глоссы от собеседника',
           color: cs.secondary, bg: cs.secondaryContainer.withValues(alpha: 0.5)),
+      if (_signVideoB64 != null)
+        Container(
+          key: ValueKey(_signVideoB64),
+          height: 180,
+          color: Colors.black,
+          child: _SignVideoPlayer(base64Mp4: _signVideoB64!),
+        ),
       Expanded(
         child: _glossMsgs.isEmpty
             ? _EmptyState(icon: Icons.chat_bubble_outline,
@@ -812,6 +832,27 @@ class _CameraView extends StatelessWidget {
         v.style.width = '100%';
         v.style.height = '100%';
         v.style.objectFit = 'cover';
+      },
+    );
+  }
+}
+
+class _SignVideoPlayer extends StatelessWidget {
+  final String base64Mp4;
+  const _SignVideoPlayer({required this.base64Mp4});
+
+  @override
+  Widget build(BuildContext context) {
+    return HtmlElementView.fromTagName(
+      tagName: 'video',
+      onElementCreated: (element) {
+        final v = element as web.HTMLVideoElement;
+        v.src = 'data:video/mp4;base64,$base64Mp4';
+        v.autoplay = true;
+        v.controls = true;
+        v.style.width = '100%';
+        v.style.height = '100%';
+        v.style.objectFit = 'contain';
       },
     );
   }

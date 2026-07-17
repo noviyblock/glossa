@@ -154,6 +154,7 @@ async def translate(req: TranslateRequest):
         translation=result["translation"],
         glosses=result.get("glosses"),
         audio_wav=result.get("audio_wav"),
+        video_mp4=result.get("video_mp4"),
         latency_ms=result["latency_ms"],
     )
 
@@ -178,6 +179,7 @@ async def ws_translate(ws: WebSocket, mode: str):
         {"type": "chunk",   "payload": {"text": str, "is_final": false},        "session_id": "..."}
         {"type": "result",  "payload": {"text": str, "confidence": float},      "session_id": "..."}
         {"type": "audio",   "payload": {"wav": "<base64>"},                     "session_id": "..."}
+        {"type": "video",   "payload": {"video": "<base64 mp4>"},               "session_id": "..."}
         {"type": "error",   "payload": {"message": str},                        "session_id": "..."}
     """
     if mode not in ("rsl_to_text", "text_to_rsl"):
@@ -251,6 +253,7 @@ async def ws_translate(ws: WebSocket, mode: str):
                 russian_text   = result["text"]
                 gloss_sequence = result["gloss_sequence"]
                 wav_b64        = result["wav_b64"]
+                video_b64      = result.get("video_b64")
 
                 # 1. Recognised text (partial chunk)
                 if russian_text:
@@ -262,6 +265,11 @@ async def ws_translate(ws: WebSocket, mode: str):
                 # 3. TTS audio output
                 if wav_b64:
                     await _send("audio", {"wav": wav_b64})
+
+                # 4. Sign-clip video output — best-effort, None if none of the
+                # glosses matched a reference clip (see SignVideoAssembler).
+                if video_b64:
+                    await _send("video", {"video": video_b64})
 
             # ── End session ─────────────────────────────────────────────── #
             elif msg_type == "end_session":
