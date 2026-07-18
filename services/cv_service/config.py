@@ -10,14 +10,25 @@ CONF_THRESHOLD   = float(os.getenv("CONF_THRESHOLD", "0.7"))
 ONNX_MOBILE_PATH = os.getenv("ONNX_MOBILE_PATH", "/models/gesture_classifier_mobile.onnx")
 OV_XML_PATH      = os.getenv("OV_XML_PATH", "/models/stgcn_topk_int8/stgcn_topk_int8.xml")
 NORM_STATS_PATH  = os.getenv("NORM_STATS_PATH", "/models/norm_stats.npz")
-# rtmlib Wholebody mode — 'lightweight' (current default, RTMDet-nano +
-# RTMPose-t, fastest/least accurate), 'balanced' (RTMDet-m + RTMPose-m,
-# meaningfully more accurate hand/finger localization at moderate extra
-# cost), 'performance' (heaviest/most accurate, likely too slow for
-# real-time on CPU). NOT benchmarked in this environment (no network access
-# to download the balanced/performance ONNX weights) — worth an empirical
-# CPU-latency-vs-accuracy comparison on the actual deployment host before
-# switching away from the default.
+# rtmlib Wholebody mode — 'lightweight' (current default, yolox_tiny +
+# rtmw-dw-l-m), 'balanced' (yolox_m + rtmw-dw-x-l, genuinely bigger models),
+# 'performance' (heaviest, not benchmarked, likely too slow for real-time
+# on CPU).
+#
+# Benchmarked 2026-07-18 on glossa-vm-demo (CPU), scripts/measure_accuracy.py
+# against all 200 models/gloss_clips (185 evaluated, 15 skipped as too
+# short), see RTMLIB_MODE_BENCHMARK.md:
+#   lightweight: top-1 0.9514 (95% CI 0.920-0.982), extraction 40.75ms/frame
+#   balanced:    top-1 0.9459 (95% CI 0.913-0.979), extraction 132.75ms/frame
+# CIs overlap heavily -- the accuracy difference is noise at this sample
+# size (n=185). The 3.26x extraction-latency cost is NOT noise (averaged
+# over 7321 frames, and expected: balanced's detector/pose backbones are
+# both architecturally larger). Verdict: 'balanced' is not worth it on CPU
+# — pays a large, certain latency cost for an accuracy change that isn't
+# even distinguishable from the current default. Re-evaluate only if the
+# GPU path (services/cv_service/Dockerfile's production-gpu target) gets
+# wired into the live deployment, since that would shrink the latency
+# cost this verdict is based on (does not change the accuracy finding).
 RTMLIB_MODE   = os.getenv("RTMLIB_MODE",   "lightweight")
 RTMLIB_DEVICE = os.getenv("RTMLIB_DEVICE", "cpu")
 CLASS_MAP_PATH   = os.getenv("CLASS_MAP_PATH", "/data/idx_to_class.json")
