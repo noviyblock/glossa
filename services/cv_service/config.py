@@ -31,6 +31,16 @@ CLASS_MAP_PATH   = os.getenv("CLASS_MAP_PATH", "/data/idx_to_class.json")
 DET_INTERVAL       = int(os.getenv("DET_INTERVAL", "5"))
 TRACK_CROP_PADDING = float(os.getenv("TRACK_CROP_PADDING", "1.8"))
 
+# Cadence (in frames) of the periodic DIAG log in main.py. Default 30 is
+# fine for steady-state dropout monitoring, but segments produced by
+# GestureSegmenter are frequently SHORTER than 30 frames (observed range:
+# 19-150+) — at the default cadence most segments get at most one
+# last_activity sample, which isn't enough resolution to derive
+# GESTURE_ONSET/OFFSET_THRESHOLD from the last_activity distribution.
+# Set to 1-3 for a calibration run, back to 30 (or unset) afterwards —
+# this only changes log volume, no classification behavior.
+DIAG_LOG_INTERVAL = int(os.getenv("DIAG_LOG_INTERVAL", "30"))
+
 # Joints with confidence below this are hard-zeroed (x=y=score=0) to match
 # DWPose's implicit "not detected = absent" semantics — see
 # keypoint_extractor.py::_zero_low_confidence_joints. Matches the client's
@@ -103,3 +113,13 @@ TTA_JITTER_SIGMA = float(os.getenv("TTA_JITTER_SIGMA", "0.02"))
 REDIS_URL        = os.getenv("REDIS_URL", "redis://redis:6379")
 CV_STREAM_OUT    = os.getenv("CV_STREAM_OUT", "cv:results")
 SERVICE_PORT     = int(os.getenv("CV_SERVICE_PORT", "8001"))
+
+# Per-session state (_session_segmenters/_session_smoothers/_session_tracks/
+# _session_locks/_diag_counters in main.py) grows unboundedly otherwise —
+# background sweep in main.py evicts sessions idle longer than
+# SESSION_IDLE_TTL, checked every SESSION_CLEANUP_INTERVAL. TTL matches
+# api_gateway's GATEWAY_SESSION_TTL (services/api_gateway/config.py, default
+# 300s) — no point holding cv_service state longer than the gateway still
+# remembers the session.
+SESSION_CLEANUP_INTERVAL = int(os.getenv("SESSION_CLEANUP_INTERVAL", "60"))
+SESSION_IDLE_TTL         = int(os.getenv("SESSION_IDLE_TTL", "300"))

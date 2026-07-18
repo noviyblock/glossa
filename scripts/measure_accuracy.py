@@ -19,10 +19,13 @@ Two input modes:
 
     labels.csv columns: filename,gloss  (filename without .npy extension ok)
 
-Reports: top-1/top-3 accuracy, with/without TTA, per-clip breakdown, and
-flags whether wrong predictions are at least in the SAME top-3 (near-miss —
-suggests real model confusion between similar signs) vs nowhere close
-(suggests a pipeline bug rather than a hard example).
+Reports: top-1/top-3 accuracy, with/without TTA, per-clip breakdown, avg
+extraction latency/frame (rtmlib forward pass under whatever RTMLIB_MODE
+the process was started with -- set the env var before running to compare
+modes, e.g. RTMLIB_MODE=balanced python scripts/measure_accuracy.py ...),
+and flags whether wrong predictions are at least in the SAME top-3
+(near-miss -- suggests real model confusion between similar signs) vs
+nowhere close (suggests a pipeline bug rather than a hard example).
 """
 from __future__ import annotations
 
@@ -48,23 +51,33 @@ def load_labels_csv(path: str) -> dict[str, str]:
     return labels
 
 
-def extract_raw_keypoints_from_video(extractor, video_path: str) -> np.ndarray:
-    """Run the ACTUAL production KeypointExtractor over every frame of a clip."""
+def extract_raw_keypoints_from_video(extractor, video_path: str) -> tuple[np.ndarray, float]:
+    """Run the ACTUAL production KeypointExtractor over every frame of a clip.
+
+    Returns (keypoints, extraction_seconds) -- the timer wraps only
+    extractor.extract() calls (the rtmlib Wholebody forward pass under
+    whatever RTMLIB_MODE the process was started with), not cv2 decode,
+    so it's comparable to the cv_service /process_frame latency budget.
+    """
     import cv2
     from keypoint_extractor import TrackState
 
     cap = cv2.VideoCapture(video_path)
     track = TrackState()
     frames_kp = []
+    elapsed = 0.0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        frames_kp.append(extractor.extract(frame, track))
+        t0 = time.perf_counter()
+        kp = extractor.extract(frame, track)
+        elapsed += time.perf_counter() - t0
+        frames_kp.append(kp)
     cap.release()
     if not frames_kp:
-        return np.zeros((0, 75, 3), dtype=np.float32)
-    return np.stack(frames_kp, axis=0)
+        return np.zeros((0, 75, 3), dtype=np.float32), 0.0
+    return np.stack(frames_kp, axis=0), elapsed
 
 
 def main() -> None:
@@ -132,12 +145,16 @@ def main() -> None:
     top1_hits = top1_hits_tta = top3_hits = near_miss = 0
     skipped = 0
     total_latency = 0.0
+    total_extract_latency = 0.0
+    total_extract_frames = 0
     mistakes: list[tuple[str, str, str, bool]] = []  # (stem, true, pred, near_miss)
 
     for stem, true_gloss in rows:
         if args.clips_dir:
             video_path = str(next(Path(args.clips_dir).glob(f"{stem}.*")))
-            raw_kp = extract_raw_keypoints_from_video(extractor, video_path)
+            raw_kp, extract_elapsed = extract_raw_keypoints_from_video(extractor, video_path)
+            total_extract_latency += extract_elapsed
+            total_extract_frames += raw_kp.shape[0]
         else:
             raw_kp = np.load(Path(args.keypoints_dir) / f"{stem}.npy").astype(np.float32)
 
@@ -179,6 +196,10 @@ def main() -> None:
     print(f"Top-1 accuracy (with TTA):    {top1_hits_tta/n:.4f}")
     print(f"Top-3 accuracy (with TTA):    {top3_hits/n:.4f}")
     print(f"Avg single-pass latency:      {1000*total_latency/n:.2f}ms")
+    if total_extract_frames:
+        print(f"Avg extraction latency/frame: {1000*total_extract_latency/total_extract_frames:.2f}ms "
+              f"(rtmlib mode={cfg.RTMLIB_MODE}, device={cfg.RTMLIB_DEVICE}, "
+              f"{total_extract_frames} frames over {n} clips)")
     wrong = n - top1_hits_tta
     if wrong:
         print(f"\nOf {wrong} wrong top-1 predictions: {near_miss} ({near_miss/wrong*100:.0f}%) had the "

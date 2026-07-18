@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import time
@@ -36,11 +37,51 @@ _session_smoothers: dict[str, KeypointSmoother] = {}
 _session_tracks: dict[str, TrackState] = {}
 _session_locks: dict[str, asyncio.Lock] = {}
 _diag_counters: dict[str, int] = {}
+# monotonic timestamp of the last /process_frame call per session — the
+# sweep in _cleanup_idle_sessions() below is the only reader/writer besides
+# process_frame itself.
+_session_last_access: dict[str, float] = {}
+_cleanup_task: asyncio.Task | None = None
+
+
+async def _cleanup_idle_sessions() -> None:
+    """Background sweep: evict per-session state (GestureSegmenter/
+    KeypointSmoother/TrackState/lock/diag counter) for sessions idle longer
+    than SESSION_IDLE_TTL. Without this, these dicts grow for as long as the
+    process runs — every session_id that ever connected stays resident.
+
+    Skips a session if its lock is currently held (mid-request) rather than
+    deleting out from under it — picked up on the next sweep instead.
+    """
+    while True:
+        await asyncio.sleep(cfg.SESSION_CLEANUP_INTERVAL)
+        now = time.monotonic()
+        stale = [
+            sid for sid, last_seen in list(_session_last_access.items())
+            if now - last_seen > cfg.SESSION_IDLE_TTL
+        ]
+        if not stale:
+            continue
+        evicted = 0
+        for sid in stale:
+            lock = _session_locks.get(sid)
+            if lock is not None and lock.locked():
+                continue
+            _session_segmenters.pop(sid, None)
+            _session_smoothers.pop(sid, None)
+            _session_tracks.pop(sid, None)
+            _session_locks.pop(sid, None)
+            _diag_counters.pop(sid, None)
+            _session_last_access.pop(sid, None)
+            evicted += 1
+        if evicted:
+            logger.info("Session cleanup: evicted %d idle session(s) (TTL=%ds)",
+                        evicted, cfg.SESSION_IDLE_TTL)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _extractor, _normalizer, _classifier, _redis, _ready
+    global _extractor, _normalizer, _classifier, _redis, _ready, _cleanup_task
     logger.info("Loading models…")
     _extractor  = KeypointExtractor()
     _normalizer = Normalizer(cfg.NORM_STATS_PATH)
@@ -51,8 +92,13 @@ async def lifespan(app: FastAPI):
     )
     _redis = aioredis.from_url(cfg.REDIS_URL, decode_responses=True)
     _ready = True
+    _cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
     logger.info("CV service ready")
     yield
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _cleanup_task
     if _extractor:
         _extractor.close()
     if _redis:
@@ -130,6 +176,12 @@ async def process_frame(body: dict[str, Any]):
     session_id = body.get("session_id", "")
     h, w = frame.shape[:2]
 
+    # Touch before doing any work, not after — a session mid-request (however
+    # long extraction/classification takes) must never look idle to the
+    # cleanup sweep, and this also "revives" a session that _cleanup_idle_sessions
+    # is about to (or just did) evict.
+    _session_last_access[session_id] = time.monotonic()
+
     # Per-session state (GestureSegmenter/KeypointSmoother/TrackState) is
     # mutated below and is NOT safe under concurrent access — a lock keeps
     # frames for the same session strictly serialized even if the client (or
@@ -150,10 +202,11 @@ async def process_frame(body: dict[str, Any]):
 
         seg = _session_segmenters.setdefault(session_id, GestureSegmenter(session_id=session_id))
 
-        # Periodic diagnostic log (every 30 frames) — activity score included
-        # for empirical threshold tuning (see GESTURE_* constants in config.py).
+        # Periodic diagnostic log (every DIAG_LOG_INTERVAL frames) — activity
+        # score included for empirical threshold tuning (see GESTURE_*
+        # constants in config.py).
         _diag_counters[session_id] = _diag_counters.get(session_id, 0) + 1
-        if _diag_counters[session_id] % 30 == 0:
+        if _diag_counters[session_id] % cfg.DIAG_LOG_INTERVAL == 0:
             # Per-region breakdown, not just a combined total — the combined
             # number alone can't tell you whether it's the whole person
             # dropping out (bad framing/lighting/distance) or specifically

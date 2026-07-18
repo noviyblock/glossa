@@ -112,6 +112,12 @@ services:
       HAND_LOW_CONF_ZERO_THRESHOLD: "0.15"
       DET_INTERVAL: "5"
       TRACK_CROP_PADDING: "1.8"
+      # ${VAR:-default} (not a literal, unlike the vars above) so a
+      # calibration run can override it from the shell without editing this
+      # file: `DIAG_LOG_INTERVAL=1 docker compose up -d cv-service` — set to
+      # 1-3 while collecting last_activity samples for GESTURE_* threshold
+      # calibration (see SEGMENTER_CALIBRATION.md), leave unset otherwise.
+      DIAG_LOG_INTERVAL: "${DIAG_LOG_INTERVAL:-30}"
       SMOOTHING_ENABLED: "true"
       SMOOTH_MINCUTOFF: "1.0"
       SMOOTH_BETA: "0.3"
@@ -141,6 +147,11 @@ services:
       GESTURE_PREROLL_FRAMES: "5"
       GESTURE_MIN_FRAMES: "8"
       GESTURE_MAX_FRAMES: "150"
+      # Per-session state cleanup — TTL matches api-gateway's
+      # GATEWAY_SESSION_TTL below, so cv-service doesn't hold state longer
+      # than the gateway still remembers the session.
+      SESSION_CLEANUP_INTERVAL: "60"
+      SESSION_IDLE_TTL: "300"
       # Runtime
       CV_SERVICE_PORT: "8001"
       REDIS_URL: redis://redis:6379
