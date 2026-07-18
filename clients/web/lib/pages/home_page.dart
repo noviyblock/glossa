@@ -94,8 +94,21 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _startCamera() async {
     try {
+      // Ideal, not exact -- requests the higher resolution but falls back
+      // gracefully to whatever the camera actually supports instead of
+      // failing outright. Was `video: true` (browser's default pick, often
+      // well below what the webcam supports) drawn into a hardcoded 640x480
+      // canvas -- finger keypoints are only a few pixels wide at that size,
+      // a likely contributor to the hand-keypoint dropout seen in live
+      // sessions (see TRIAGE_MEMORY_GAZETA.md).
       final stream = await web.window.navigator.mediaDevices
-          .getUserMedia(web.MediaStreamConstraints(video: true.toJS, audio: false.toJS))
+          .getUserMedia(web.MediaStreamConstraints(
+            video: web.MediaTrackConstraints(
+              width: web.ConstrainULongRange(ideal: 1280),
+              height: web.ConstrainULongRange(ideal: 720),
+            ),
+            audio: false.toJS,
+          ))
           .toDart;
       _mediaStream = stream;
       _video = web.HTMLVideoElement()
@@ -104,7 +117,11 @@ class _HomePageState extends State<HomePage> {
         ..muted = true;
       // Off-screen video must be explicitly played in some browsers
       try { await _video!.play().toDart; } catch (_) {}
-      _canvas = web.HTMLCanvasElement()..width = 640..height = 480;
+      // Matches the requested ideal above -- drawImage (in _sendFrame)
+      // scales whatever the camera actually delivered into this canvas
+      // regardless, so this stays safe even if the camera only supports
+      // less than 1280x720.
+      _canvas = web.HTMLCanvasElement()..width = 1280..height = 720;
       if (mounted) setState(() => _cameraActive = true);
       await _connectRslWs();
       // Poll frequently (not just every 100ms) so the next frame goes out
