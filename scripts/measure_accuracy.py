@@ -107,14 +107,14 @@ def main() -> None:
     classifier = GestureClassifier(
         ov_xml_path=args.ov_xml, onnx_path=args.onnx, class_map_path=args.class_map,
     )
-    print(f"Classifier backend: {classifier._backend}")  # noqa: SLF001 — diagnostic only
+    print(f"Classifier backend: {classifier._backend}")  # diagnostic only
 
     extractor = None
     if args.clips_dir:
         from keypoint_extractor import KeypointExtractor
         extractor = KeypointExtractor()
 
-    class_to_idx = {v: k for k, v in classifier._idx_to_class.items()}  # noqa: SLF001
+    class_to_idx = {v: k for k, v in classifier._idx_to_class.items()}
 
     rows: list[tuple[str, str]] = []  # (stem, true_gloss)
     if args.clips_dir:
@@ -208,7 +208,7 @@ def main() -> None:
               f"(true gloss not even in top-3 — investigate the pipeline, not just the model).")
 
     if mistakes:
-        print(f"\nMistakes (clip / true / predicted / near-miss?):")
+        print("\nMistakes (clip / true / predicted / near-miss?):")
         for stem, true_g, pred_g, is_near in mistakes[:30]:
             flag = "near-miss" if is_near else "FAR OFF"
             print(f"  {stem:20s}  true={true_g!r:20s}  pred={pred_g!r:20s}  [{flag}]")

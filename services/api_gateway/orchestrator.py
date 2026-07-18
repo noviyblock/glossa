@@ -186,7 +186,7 @@ class Orchestrator:
         # Persist session state, including a short rolling history for the
         # next call's context (only append non-empty, genuinely new turns).
         if translation and (not history or history[-1] != translation):
-            history = (history + [translation])[-_HISTORY_TURNS:]
+            history = [*history, translation][-_HISTORY_TURNS:]
 
         await self._set_session(session_id, {
             "mode": "rsl_to_text",
@@ -241,7 +241,7 @@ class Orchestrator:
 
         translation = await self._flush_sentence(session_id, pending_positions, history)
         if translation and (not history or history[-1] != translation):
-            history = (history + [translation])[-_HISTORY_TURNS:]
+            history = [*history, translation][-_HISTORY_TURNS:]
 
         await self._set_session(session_id, {
             **session,
@@ -250,6 +250,70 @@ class Orchestrator:
             "pending_positions": [],
         })
         return {"translation": translation, "pending_positions": []}
+
+    # ── Downstream calls with built-in graceful degradation ─────────────────
+    #
+    # Shared by both the WS path (process_audio) and the REST path
+    # (translate_sync) for the same text_to_rsl direction — previously each
+    # path duplicated (WS) or skipped (REST) this fallback logic, so REST
+    # would raise a hard 500/502/504 on the whole request whenever NLP or
+    # TTS hiccuped instead of degrading like WS already did.
+
+    async def _translate_reverse(self, session_id: str, text: str) -> str:
+        """Russian text -> RSL gloss sequence via NLP /translate_reverse.
+
+        Falls back to echoing the input text on any failure — never raises.
+        """
+        if not text:
+            return text
+        try:
+            resp = await self._http.post(
+                f"{NLP_SERVICE_URL}/translate_reverse",
+                json={"text": text, "session_id": session_id},
+            )
+            resp.raise_for_status()
+            return resp.json().get("translation", text)
+        except Exception as exc:
+            logger.warning("NLP reverse error session=%s: %s — falling back to raw text", session_id, exc)
+            return text
+
+    async def _synthesize_audio(self, session_id: str, text: str) -> str:
+        """Russian text -> base64 WAV via TTS /synthesize.
+
+        Returns "" on any failure (including empty input) — never raises.
+        """
+        if not text:
+            return ""
+        try:
+            resp = await self._http.post(
+                f"{TTS_SERVICE_URL}/synthesize",
+                json={"text": text, "speaker": "xenia"},
+            )
+            resp.raise_for_status()
+            return resp.json().get("audio", "")
+        except Exception as exc:
+            logger.warning("TTS service error session=%s: %s", session_id, exc)
+            return ""
+
+    async def _render_sign_video(self, session_id: str, gloss_sequence: str) -> str | None:
+        """gloss_sequence -> base64 MP4 via TTS /sign_video.
+
+        None covers both "nothing matched a clip" and "the call failed" —
+        both mean the same thing to the caller: no visual available. Never
+        raises.
+        """
+        if not gloss_sequence:
+            return None
+        try:
+            resp = await self._http.post(
+                f"{TTS_SERVICE_URL}/sign_video",
+                json={"gloss_sequence": gloss_sequence},
+            )
+            resp.raise_for_status()
+            return resp.json().get("video")
+        except Exception as exc:
+            logger.warning("TTS sign_video error session=%s: %s", session_id, exc)
+            return None
 
     async def delete_last_pending(self, session_id: str) -> list[list[dict]]:
         """User-initiated correction: drop the most recently buffered
@@ -299,17 +363,7 @@ class Orchestrator:
         )
 
         # 2. NLP service — Russian text → RSL gloss sequence (reverse translation)
-        gloss_sequence = russian_text  # fallback: echo the text
-        if russian_text:
-            try:
-                nlp_resp = await self._http.post(
-                    f"{NLP_SERVICE_URL}/translate_reverse",
-                    json={"text": russian_text, "session_id": session_id},
-                )
-                nlp_resp.raise_for_status()
-                gloss_sequence = nlp_resp.json().get("translation", russian_text)
-            except Exception as exc:
-                logger.warning("NLP reverse error session=%s: %s — falling back to raw text", session_id, exc)
+        gloss_sequence = await self._translate_reverse(session_id, russian_text)
 
         # Publish to nlp:results stream
         await self._redis.xadd(
@@ -319,33 +373,10 @@ class Orchestrator:
         )
 
         # 3. TTS service — synthesize Russian text to audio
-        wav_b64 = ""
-        if russian_text:
-            try:
-                tts_resp = await self._http.post(
-                    f"{TTS_SERVICE_URL}/synthesize",
-                    json={"text": russian_text, "speaker": "xenia"},
-                )
-                tts_resp.raise_for_status()
-                wav_b64 = tts_resp.json().get("audio", "")
-            except Exception as exc:
-                logger.warning("TTS service error session=%s: %s", session_id, exc)
+        wav_b64 = await self._synthesize_audio(session_id, russian_text)
 
         # 4. TTS service — render gloss_sequence as concatenated sign clips.
-        # None (not "") when no glosses matched a clip — distinguishable from
-        # "not attempted" so the client can tell "no visual available" apart
-        # from a service error.
-        video_b64: str | None = None
-        if gloss_sequence:
-            try:
-                video_resp = await self._http.post(
-                    f"{TTS_SERVICE_URL}/sign_video",
-                    json={"gloss_sequence": gloss_sequence},
-                )
-                video_resp.raise_for_status()
-                video_b64 = video_resp.json().get("video")
-            except Exception as exc:
-                logger.warning("TTS sign_video error session=%s: %s", session_id, exc)
+        video_b64 = await self._render_sign_video(session_id, gloss_sequence)
 
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         logger.info("text_to_rsl latency=%.1fms session=%s", latency_ms, session_id)
@@ -388,35 +419,16 @@ class Orchestrator:
         elif mode == "text_to_rsl":
             if not text:
                 raise ValueError("text required for text_to_rsl")
-            # Reverse: Russian text → RSL glosses
-            nlp_resp = await self._http.post(
-                f"{NLP_SERVICE_URL}/translate_reverse",
-                json={"text": text, "session_id": session_id},
-            )
-            nlp_resp.raise_for_status()
-            gloss_seq = nlp_resp.json().get("translation", "")
-            # Also synthesize audio
-            tts_resp = await self._http.post(
-                f"{TTS_SERVICE_URL}/synthesize",
-                json={"text": text, "speaker": "xenia"},
-            )
-            tts_resp.raise_for_status()
-            # And render the gloss sequence as concatenated sign clips —
-            # best-effort, None if nothing matched (see SignVideoAssembler).
-            video_b64: str | None = None
-            if gloss_seq:
-                try:
-                    video_resp = await self._http.post(
-                        f"{TTS_SERVICE_URL}/sign_video",
-                        json={"gloss_sequence": gloss_seq},
-                    )
-                    video_resp.raise_for_status()
-                    video_b64 = video_resp.json().get("video")
-                except Exception as exc:
-                    logger.warning("TTS sign_video error session=%s: %s", session_id, exc)
+            # Reverse: Russian text → RSL glosses. Same graceful-degradation
+            # helpers as the WS path (process_audio) — NLP/TTS being down no
+            # longer fails the whole REST request, it just returns whatever
+            # partial content succeeded (echoed text, empty audio, no video).
+            gloss_seq = await self._translate_reverse(session_id, text)
+            wav_b64 = await self._synthesize_audio(session_id, text)
+            video_b64 = await self._render_sign_video(session_id, gloss_seq)
             return {
                 "translation": gloss_seq,
-                "audio_wav": tts_resp.json().get("audio", ""),
+                "audio_wav": wav_b64,
                 "video_mp4": video_b64,
                 "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
             }
