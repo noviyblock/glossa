@@ -101,11 +101,19 @@ class _HomePageState extends State<HomePage> {
       // canvas -- finger keypoints are only a few pixels wide at that size,
       // a likely contributor to the hand-keypoint dropout seen in live
       // sessions (see TRIAGE_MEMORY_GAZETA.md).
+      // frameRate ideal:30 is a cheap, standards-based nudge against motion
+      // blur: most webcams' auto-exposure caps exposure time at ~1/fps, so
+      // asking for a higher fps indirectly asks for shorter exposure on
+      // fast hand motion -- NOT a guarantee (auto-exposure logic is
+      // driver-specific), and deliberately NOT setting exposureTime/
+      // exposureMode directly, since manual exposure units are camera-specific
+      // and unsupported hardware would need testing before hardcoding a value.
       final stream = await web.window.navigator.mediaDevices
           .getUserMedia(web.MediaStreamConstraints(
             video: web.MediaTrackConstraints(
               width: web.ConstrainULongRange(ideal: 1280),
               height: web.ConstrainULongRange(ideal: 720),
+              frameRate: web.ConstrainDoubleRange(ideal: 30),
             ),
             audio: false.toJS,
           ))
