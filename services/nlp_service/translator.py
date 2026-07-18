@@ -95,13 +95,18 @@ class Translator:
                 "volume mount for /models."
             )
 
+        # bandit B615 (unpinned Hub revision) doesn't apply here: model_path
+        # is required to already be a local directory (checked above), and
+        # local_files_only=True means from_pretrained() never resolves a
+        # revision against the Hub at all -- there's no network path for a
+        # tampered/moved "main" ref to matter on.
         logger.info("Loading tokenizer from %s", model_path)
-        self._tokenizer = AutoTokenizer.from_pretrained(
+        self._tokenizer = AutoTokenizer.from_pretrained(  # nosec B615
             model_path, trust_remote_code=True, local_files_only=True
         )
 
         logger.info("Loading model (bfloat16, device_map=%s)", device_map)
-        self._model = AutoModelForCausalLM.from_pretrained(
+        self._model = AutoModelForCausalLM.from_pretrained(  # nosec B615
             model_path,
             torch_dtype=torch.bfloat16,
             device_map=device_map,
@@ -110,7 +115,17 @@ class Translator:
         )
         self._model.eval()
         self._max_new_tokens = max_new_tokens
-        logger.info("Model ready")
+        # `device_map` above is the REQUESTED placement — accelerate can
+        # silently resolve "auto"/"cuda" to CPU (e.g. CUDA not visible
+        # inside the container) with no exception. Log what actually
+        # happened, not just what was asked for, so "is NLP really on GPU"
+        # is answerable from `docker compose logs nlp-service` alone.
+        resolved_placement = getattr(self._model, "hf_device_map", None) \
+            or {"": str(next(self._model.parameters()).device)}
+        logger.info(
+            "Model ready — torch.cuda.is_available=%s cuda_device_count=%d resolved_placement=%s",
+            torch.cuda.is_available(), torch.cuda.device_count(), resolved_placement,
+        )
 
     # ------------------------------------------------------------------ #
 
