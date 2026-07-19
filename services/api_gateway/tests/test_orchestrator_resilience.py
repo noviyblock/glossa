@@ -23,6 +23,13 @@ import pytest
 # directory to sys.path, not the parent, so `import orchestrator` needs an
 # explicit path insert. Same pattern as scripts/measure_accuracy.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Every flat-file service has its OWN config.py, imported as the bare name
+# `config`. If pytest collects another service's tests in the same process
+# first (default testpaths=["services","libs"] does exactly this), that
+# service's config.py may already be cached under sys.modules['config'] --
+# without this pop, the import below could silently resolve against the
+# wrong service's config.
+sys.modules.pop("config", None)
 
 from config import NLP_SERVICE_URL, TTS_SERVICE_URL  # noqa: E402
 from orchestrator import Orchestrator  # noqa: E402
