@@ -28,6 +28,12 @@ class _GlossItem {
   const _GlossItem(this.gloss, this.prob);
 }
 
+// Same value as services/api_gateway/orchestrator.py's _MIN_CONFIDENCE —
+// that constant already gates what enters sentence accumulation server-side;
+// this keeps the live gloss chips from showing predictions the server itself
+// would discard as noise.
+const double _kMinDisplayConfidence = 0.15;
+
 // ── HomePage ──────────────────────────────────────────────────────────────────── //
 
 class HomePage extends StatefulWidget {
@@ -90,6 +96,15 @@ class _HomePageState extends State<HomePage> {
 
   final _sessionId = const Uuid().v4();
 
+  // ── Two-party call (MVP — see call_manager.py) ──────────────────────────── //
+  // Pairs this session with another via a short code; the other
+  // participant's finished translations arrive as 'peer_message' WS events
+  // and are appended into _rslMsgs (same bubble list as own recognition
+  // results, prefixed to tell them apart) -- no new render widget needed.
+  String? _callId;
+  final _joinCodeCtrl = TextEditingController();
+  bool _callBusy = false;
+
   // ── Camera ───────────────────────────────────────────────────────────────── //
 
   Future<void> _startCamera() async {
@@ -101,6 +116,19 @@ class _HomePageState extends State<HomePage> {
       // canvas -- finger keypoints are only a few pixels wide at that size,
       // a likely contributor to the hand-keypoint dropout seen in live
       // sessions (see TRIAGE_MEMORY_GAZETA.md).
+      //
+      // 720x1280 (9:16 portrait), not 16:9 landscape -- verified via PyAV
+      // against the actual reference clips (models/gloss_clips/*.mp4,
+      // n=20 sample): 17/20 are 480x854 (~9:16), matching Slovo's
+      // phone-shot-vertical-video source convention, not a webcam-style
+      // landscape frame. The model was trained on that framing; a
+      // landscape capture wastes most of its frame on empty left/right
+      // space the model never saw during training. This is `ideal`, not
+      // `exact` -- a laptop webcam with a fixed landscape sensor can't
+      // actually reorient itself and will just deliver its native
+      // landscape frame (browser does not letterbox to fake portrait),
+      // which is fine: drawImage below still scales whatever the camera
+      // delivers into this canvas.
       // frameRate ideal:30 is a cheap, standards-based nudge against motion
       // blur: most webcams' auto-exposure caps exposure time at ~1/fps, so
       // asking for a higher fps indirectly asks for shorter exposure on
@@ -111,8 +139,8 @@ class _HomePageState extends State<HomePage> {
       final stream = await web.window.navigator.mediaDevices
           .getUserMedia(web.MediaStreamConstraints(
             video: web.MediaTrackConstraints(
-              width: web.ConstrainULongRange(ideal: 1280),
-              height: web.ConstrainULongRange(ideal: 720),
+              width: web.ConstrainULongRange(ideal: 720),
+              height: web.ConstrainULongRange(ideal: 1280),
               frameRate: web.ConstrainDoubleRange(ideal: 30),
             ),
             audio: false.toJS,
@@ -128,8 +156,8 @@ class _HomePageState extends State<HomePage> {
       // Matches the requested ideal above -- drawImage (in _sendFrame)
       // scales whatever the camera actually delivered into this canvas
       // regardless, so this stays safe even if the camera only supports
-      // less than 1280x720.
-      _canvas = web.HTMLCanvasElement()..width = 1280..height = 720;
+      // a different resolution or falls back to landscape.
+      _canvas = web.HTMLCanvasElement()..width = 720..height = 1280;
       if (mounted) setState(() => _cameraActive = true);
       await _connectRslWs();
       // Poll frequently (not just every 100ms) so the next frame goes out
@@ -193,8 +221,33 @@ class _HomePageState extends State<HomePage> {
     if (_waitingForResponse) return;
     final ctx = _canvas!.getContext('2d') as web.CanvasRenderingContext2D?;
     if (ctx == null) return;
-    // Draw scaled to canvas size so the full frame is captured (not just top-left crop)
-    ctx.drawImage(_video!, 0, 0, _canvas!.width, _canvas!.height);
+    // Center-crop (not stretch) the source video to the canvas's aspect
+    // ratio before scaling. Needed because the canvas targets a 9:16
+    // portrait aspect (see _startCamera's comment -- matches the reference
+    // clips' training framing) but a fixed-sensor landscape webcam can't
+    // actually deliver portrait video, so _video's natural frame is often
+    // still 16:9 -- drawing that whole frame into a 9:16 canvas without
+    // cropping would squash people horizontally instead of just showing
+    // less of the sides, corrupting keypoint geometry sent to the model.
+    final vw = _video!.videoWidth.toDouble();
+    final vh = _video!.videoHeight.toDouble();
+    final cw = _canvas!.width.toDouble();
+    final ch = _canvas!.height.toDouble();
+    double sx = 0, sy = 0, sw = vw, sh = vh;
+    if (vw > 0 && vh > 0) {
+      final srcAspect = vw / vh;
+      final dstAspect = cw / ch;
+      if (srcAspect > dstAspect) {
+        // source wider than target -- crop left/right
+        sw = vh * dstAspect;
+        sx = (vw - sw) / 2;
+      } else if (srcAspect < dstAspect) {
+        // source taller than target -- crop top/bottom
+        sh = vw / dstAspect;
+        sy = (vh - sh) / 2;
+      }
+    }
+    ctx.drawImage(_video!, sx, sy, sw, sh, 0, 0, cw, ch);
     final b64 = _canvas!.toDataURL('image/jpeg', 0.85.toJS).split(',').last;
     _lastFrameSent = DateTime.now();
     _waitingForResponse = true;
@@ -237,6 +290,7 @@ class _HomePageState extends State<HomePage> {
       case 'gloss':
         final items = (payload['glosses'] as List<dynamic>? ?? [])
             .map((g) => _GlossItem(g['gloss'] as String, (g['prob'] as num).toDouble()))
+            .where((g) => g.prob >= _kMinDisplayConfidence)
             .toList();
 
         // Parse keypoints for skeleton overlay
@@ -317,7 +371,104 @@ class _HomePageState extends State<HomePage> {
       case 'error':
         setState(() => _rslStatus = _WsStatus.error);
         break;
+
+      case 'peer_message':
+        final text = payload['text'] as String? ?? '';
+        final audio = payload['audio'] as String?;
+        final video = payload['video'] as String?;
+        if (text.isEmpty && (audio == null || audio.isEmpty) && (video == null || video.isEmpty)) break;
+        setState(() {
+          _rslMsgs.add(_Msg(text.isNotEmpty ? '👥 $text' : '👥 (аудио/видео)'));
+          if (video != null && video.isNotEmpty) _signVideoB64 = video;
+        });
+        _scrollToBottom(_rslScrollCtrl);
+        if (audio != null && audio.isNotEmpty) _playAudio(audio);
+        break;
     }
+  }
+
+  // ── Two-party call (MVP) ─────────────────────────────────────────────────── //
+
+  Future<void> _createCall() async {
+    setState(() => _callBusy = true);
+    try {
+      final resp = await http.post(
+        Uri.parse('${Config.httpBase}/api/v1/call/create'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'session_id': _sessionId}),
+      );
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (mounted && data['call_id'] != null) {
+        setState(() => _callId = data['call_id'] as String);
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _callBusy = false);
+    }
+  }
+
+  Future<void> _joinCall() async {
+    final code = _joinCodeCtrl.text.trim().toUpperCase();
+    if (code.isEmpty) return;
+    setState(() => _callBusy = true);
+    try {
+      final resp = await http.post(
+        Uri.parse('${Config.httpBase}/api/v1/call/$code/join'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'session_id': _sessionId}),
+      );
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        if (mounted) setState(() => _callId = data['call_id'] as String);
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _callBusy = false);
+    }
+  }
+
+  void _showCallDialog(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('Двусторонний звонок'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          const Text('Один участник создаёт звонок и диктует код второму.',
+              style: TextStyle(fontSize: 12)),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            icon: const Icon(Icons.add_call, size: 18),
+            label: const Text('Создать звонок'),
+            onPressed: _callBusy ? null : () async {
+              await _createCall();
+              if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
+            },
+          ),
+          const SizedBox(height: 16),
+          const Text('— или —', style: TextStyle(fontSize: 11)),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _joinCodeCtrl,
+            textCapitalization: TextCapitalization.characters,
+            decoration: const InputDecoration(
+              labelText: 'Код звонка', border: OutlineInputBorder(), isDense: true,
+            ),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.login, size: 18),
+            label: const Text('Присоединиться'),
+            onPressed: _callBusy ? null : () async {
+              await _joinCall();
+              if (dialogCtx.mounted) Navigator.of(dialogCtx).pop();
+            },
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogCtx).pop(), child: const Text('Закрыть')),
+        ],
+      ),
+    );
   }
 
   // ── Text → RSL REST ──────────────────────────────────────────────────────── //
@@ -397,6 +548,21 @@ class _HomePageState extends State<HomePage> {
           ],
         ]),
         actions: [
+          _callId != null
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  child: Chip(
+                    avatar: const Icon(Icons.call, size: 16),
+                    label: Text('Звонок: $_callId', style: const TextStyle(fontSize: 12)),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                )
+              : IconButton(
+                  tooltip: 'Двусторонний звонок',
+                  icon: const Icon(Icons.call, size: 20),
+                  onPressed: _callBusy ? null : () => _showCallDialog(context),
+                ),
           SizedBox(
             width: 210,
             child: _UrlField(
@@ -726,6 +892,7 @@ class _HomePageState extends State<HomePage> {
     _rslSub?.cancel();
     _rslWs?.sink.close();
     _textCtrl.dispose();
+    _joinCodeCtrl.dispose();
     _rslScrollCtrl.dispose();
     _glossScrollCtrl.dispose();
     super.dispose();
