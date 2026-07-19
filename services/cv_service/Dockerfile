@@ -60,7 +60,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # need to be on LD_LIBRARY_PATH explicitly — cudart/cublas/cudnn alone got it
 # loading but still missing libcurand.so.10 in production; add curand/cufft
 # up front rather than discover the next missing one at runtime again.
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cufft/lib
+#
+# nvrtc/nvjitlink aren't installed by an explicit `pip install` line above —
+# they're pulled in transitively (nvidia-cublas-cu12 depends on
+# nvidia-cuda-nvrtc-cu12; nvidia-cufft-cu12 depends on nvidia-nvjitlink-cu12,
+# confirmed via each package's PyPI metadata) — but pip installing a
+# dependency doesn't put it on LD_LIBRARY_PATH, and onnxruntime's CUDA EP
+# still dlopen's libnvrtc.so.12 directly (confirmed via production error:
+# "Failed to load library libonnxruntime_providers_cuda.so with error:
+# libnvrtc.so.12: cannot open shared object file"). nvjitlink added
+# pre-emptively, same dlopen pattern as the others, not yet independently
+# confirmed missing — remove if it turns out unnecessary.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/curand/lib:/usr/local/lib/python3.11/site-packages/nvidia/cufft/lib:/usr/local/lib/python3.11/site-packages/nvidia/cuda_nvrtc/lib:/usr/local/lib/python3.11/site-packages/nvidia/nvjitlink/lib
 
 FROM deps-cpu AS development
 COPY . .
