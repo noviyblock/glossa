@@ -9,10 +9,19 @@ services:
       # RTMLIB_DEVICE is the real config knob (see cv_service/config.py) —
       # CV_DEVICE/CV_MODEL_BACKEND previously here didn't map to anything in
       # the code and silently had no effect (extraction stayed on CPU).
-      # 'balanced' rtmlib mode (more accurate hand/finger localization than
-      # 'lightweight') is affordable now that extraction is GPU-accelerated.
+      #
+      # RTMLIB_MODE deliberately NOT overridden to 'balanced' here anymore.
+      # Benchmarked 2026-07-18 (see config.py's RTMLIB_MODE comment,
+      # RTMLIB_MODE_BENCHMARK.md): balanced's accuracy is statistically
+      # indistinguishable from lightweight (95% CIs overlap, n=185) — the
+      # "more accurate hand/finger localization" premise this override used
+      # to state was never actually measured and turned out false. GPU only
+      # cuts balanced's latency penalty, it doesn't fix its (non-existent)
+      # accuracy advantage — no reason to switch modes just because GPU
+      # makes the wrong choice cheaper. Stays on lightweight (the base
+      # compose file's default) until a live-camera (not clean-clip)
+      # benchmark shows an actual reason to switch.
       - RTMLIB_DEVICE=cuda
-      - RTMLIB_MODE=balanced
     deploy:
       resources:
         reservations:
