@@ -51,7 +51,7 @@ def _run_inference(session: Any, x: np.ndarray, batch_size: int = 32) -> list[in
 
 
 def _write_confusion_csv(confusion: list[list[int]], class_names: list[str], out_path: Path) -> None:
-    with out_path.open("w", newline="") as f:
+    with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["", *class_names])
         for i, row in enumerate(confusion):
@@ -86,14 +86,24 @@ def run(
     session = _load_onnx_session(onnx_path)
 
     # Load test dataset
-    test_dir = cfg.dataset_path / "gestures" / "processed" / "test"
+    # Was "processed"/"test" -- that's the stale T=32/1000-class dataset,
+    # and "test" doesn't exist as a split name in the current data at all
+    # (only train/val). The actual production model is trained on
+    # processed_64_200 (T=64/200-class, see data/gestures/processed_64_200.dvc);
+    # "val" is its held-out split, same one used for the TTA/backend A/B
+    # comparisons run earlier this session.
+    test_dir = cfg.dataset_path / "gestures" / "processed_64_200" / "val"
     if not test_dir.exists():
-        raise FileNotFoundError(f"Test split not found: {test_dir}")
+        raise FileNotFoundError(f"Val split not found: {test_dir}")
 
     x_test = np.load(test_dir / "features.npy")
     y_test = np.load(test_dir / "labels.npy").tolist()
     class_names_path = test_dir.parent / "class_names.json"
-    class_names = json.loads(class_names_path.read_text()) if class_names_path.exists() else []
+    class_names = (
+        json.loads(class_names_path.read_text(encoding="utf-8"))
+        if class_names_path.exists()
+        else []
+    )
 
     reports_path = cfg.reports_path
     reports_path.mkdir(parents=True, exist_ok=True)
@@ -161,7 +171,7 @@ def run(
             "n_test_samples": metrics.n_samples,
         }
         (reports_path / "gesture_eval_metrics.json").write_text(
-            json.dumps(report, indent=2)
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
         _emit_prometheus(metrics, latency, model_version or "unknown")
