@@ -12,8 +12,16 @@ import httpx
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 import redis.asyncio as aioredis
 
+from call_manager import CallManager
 from config import HTTP_TIMEOUT, REDIS_URL
-from models import TranslateRequest, TranslateResponse
+from models import (
+    CallCreateRequest,
+    CallCreateResponse,
+    CallJoinRequest,
+    CallJoinResponse,
+    TranslateRequest,
+    TranslateResponse,
+)
 from orchestrator import Orchestrator
 from ws_handler import SessionManager
 
@@ -23,6 +31,7 @@ logger = logging.getLogger("api_gateway")
 # ── Globals ────────────────────────────────────────────────────────────────── #
 _orchestrator: Orchestrator  | None = None
 _sessions:     SessionManager | None = None
+_calls:        CallManager    | None = None
 _redis:        aioredis.Redis | None = None
 _http:         httpx.AsyncClient | None = None
 _START = time.time()
@@ -30,11 +39,12 @@ _START = time.time()
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _orchestrator, _sessions, _redis, _http
+    global _orchestrator, _sessions, _calls, _redis, _http
 
     _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
     _http  = httpx.AsyncClient(timeout=HTTP_TIMEOUT, limits=httpx.Limits(max_connections=100))
     _sessions = SessionManager()
+    _calls = CallManager(_redis)
     _orchestrator = Orchestrator(_redis, _http)
     await _orchestrator.setup_streams()
     logger.info("API Gateway ready")
@@ -150,6 +160,25 @@ async def translate(req: TranslateRequest):
             content={"error": f"Upstream service error: {exc}"},
         )
 
+    # Two-party call relay (see call_manager.py): the WS handler below has
+    # its own relay for the streaming audio_chunk path, but this client's
+    # actual text_to_rsl feature goes through THIS REST endpoint (typed
+    # text, not a mic stream) — the WS-only relay would silently never fire
+    # for it, so it's repeated here for the one mode that produces
+    # something worth showing a call partner.
+    if req.mode == "text_to_rsl":
+        peer_id = await _calls.get_peer(session_id)
+        if peer_id:
+            await _sessions.send(peer_id, {
+                "type": "peer_message",
+                "payload": {
+                    "text": result["translation"],
+                    "audio": result.get("audio_wav") or None,
+                    "video": result.get("video_mp4"),
+                },
+                "session_id": peer_id,
+            })
+
     return TranslateResponse(
         translation=result["translation"],
         glosses=result.get("glosses"),
@@ -157,6 +186,30 @@ async def translate(req: TranslateRequest):
         video_mp4=result.get("video_mp4"),
         latency_ms=result["latency_ms"],
     )
+
+
+# ── REST /api/v1/call — two-party live call pairing ─────────────────────────── #
+#
+# MVP (see punch-list plan item 8): pairs two session_ids so the WS handler
+# below can relay each side's finished translation to the other participant.
+# Both participants still connect to the existing per-direction WS endpoint
+# as normal (one in rsl_to_text mode, one in text_to_rsl mode) — this only
+# adds the missing "who's my call partner" lookup, not a new transport.
+
+@app.post("/api/v1/call/create", response_model=CallCreateResponse)
+async def create_call(req: CallCreateRequest):
+    session_id = req.session_id or str(uuid.uuid4())
+    call_id = await _calls.create_call(session_id)
+    return CallCreateResponse(call_id=call_id, session_id=session_id)
+
+
+@app.post("/api/v1/call/{call_id}/join", response_model=CallJoinResponse)
+async def join_call(call_id: str, req: CallJoinRequest):
+    session_id = req.session_id or str(uuid.uuid4())
+    ok = await _calls.join_call(call_id.upper(), session_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "call not found or expired"})
+    return CallJoinResponse(call_id=call_id.upper(), session_id=session_id)
 
 
 # ── WebSocket /api/v1/ws/translate/{mode} ─────────────────────────────────── #
@@ -185,12 +238,22 @@ async def ws_translate(ws: WebSocket, mode: str):
         {"type": "audio",   "payload": {"wav": "<base64>"},                     "session_id": "..."}
         {"type": "video",   "payload": {"video": "<base64 mp4>"},               "session_id": "..."}
         {"type": "error",   "payload": {"message": str},                        "session_id": "..."}
+        {"type": "peer_message", "payload": {"text": str, "audio": str|None, "video": str|None},
+                                                                                  "session_id": "..."}
 
     `pending_sentence` is sent whenever the buffered-gesture-sequence changes
     (a gesture was appended, or the buffer just flushed) — the client uses it
     to render "sentence so far" chips and lets the user correct/send early
     via flush_sentence/delete_last_gesture instead of only waiting for the
     SENTENCE_PAUSE_SECONDS auto-flush fallback (see orchestrator.py::process_frame).
+
+    `peer_message` is a two-party call feature (see call_manager.py, POST
+    /api/v1/call/create and /api/v1/call/{call_id}/join) — this session's
+    own WS connection is unchanged either way; if it happens to be paired
+    with another session_id via a call, its finished translations are also
+    pushed to that other session's WS as `peer_message`, alongside (not
+    instead of) the normal `result`/`audio`/`video` messages sent back to
+    the session that produced them.
     """
     if mode not in ("rsl_to_text", "text_to_rsl"):
         await ws.close(code=4000, reason=f"unknown mode: {mode}")
@@ -202,6 +265,15 @@ async def ws_translate(ws: WebSocket, mode: str):
 
     async def _send(msg_type: str, payload: dict) -> None:
         await ws.send_json({"type": msg_type, "payload": payload, "session_id": session_id or ""})
+
+    async def _relay_to_peer(payload: dict) -> None:
+        """Two-party call (see call_manager.py): push a finished translation
+        to the other participant's WS, if this session is paired in a call.
+        No-op (not an error) if unpaired — every session works standalone
+        exactly as before this feature existed."""
+        peer_id = await _calls.get_peer(session_id)
+        if peer_id:
+            await _sessions.send(peer_id, {"type": "peer_message", "payload": payload, "session_id": peer_id})
 
     try:
         while True:
@@ -243,6 +315,7 @@ async def ws_translate(ws: WebSocket, mode: str):
                 if translation:
                     await _send("chunk", {"text": translation, "is_final": False})
                     await _send("result", {"text": translation, "confidence": confidence})
+                    await _relay_to_peer({"text": translation})
 
                 # 3. Buffered-sentence state, only when it actually changed
                 # this frame (gesture appended, or buffer just auto-flushed)
@@ -256,6 +329,7 @@ async def ws_translate(ws: WebSocket, mode: str):
                 if translation:
                     await _send("chunk", {"text": translation, "is_final": False})
                     await _send("result", {"text": translation, "confidence": 1.0})
+                    await _relay_to_peer({"text": translation})
                 await _send("pending_sentence", {"positions": flush_result["pending_positions"]})
 
             elif msg_type == "delete_last_gesture" and mode == "rsl_to_text":
@@ -298,6 +372,14 @@ async def ws_translate(ws: WebSocket, mode: str):
                 # glosses matched a reference clip (see SignVideoAssembler).
                 if video_b64:
                     await _send("video", {"video": video_b64})
+
+                # 5. Relay to call partner, if any -- one message carrying
+                # everything (gloss text + audio + video) so the peer's
+                # client handles it as one incoming turn, not three.
+                if gloss_sequence or wav_b64 or video_b64:
+                    await _relay_to_peer({
+                        "text": gloss_sequence, "audio": wav_b64 or None, "video": video_b64,
+                    })
 
             # ── End session ─────────────────────────────────────────────── #
             elif msg_type == "end_session":

@@ -62,6 +62,14 @@ class WsPendingSentence(BaseModel):
     session_id: str
     payload: dict[str, Any]             # {"positions": [[{"gloss","prob"},...],...]}
 
+class WsPeerMessage(BaseModel):
+    """Relayed to the *other* participant in a two-party call (see
+    call_manager.py) — same shape regardless of which direction produced
+    it: {"text": str, "audio": base64|None, "video": base64|None}."""
+    type: Literal["peer_message"] = "peer_message"
+    session_id: str
+    payload: dict[str, Any]
+
 class WsError(BaseModel):
     type: Literal["error"] = "error"
     session_id: str
@@ -85,3 +93,20 @@ class TranslateResponse(BaseModel):
     video_mp4: str | None = None        # base64 MP4, sign clips (text_to_rsl only)
     latency_ms: float
     cached: bool = False
+
+
+# ── Two-party call (see call_manager.py) ────────────────────────────────────  #
+
+class CallCreateRequest(BaseModel):
+    session_id: str = Field(default="")
+
+class CallCreateResponse(BaseModel):
+    call_id: str
+    session_id: str
+
+class CallJoinRequest(BaseModel):
+    session_id: str = Field(default="")
+
+class CallJoinResponse(BaseModel):
+    call_id: str
+    session_id: str
