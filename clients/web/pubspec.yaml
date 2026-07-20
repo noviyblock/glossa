@@ -21,3 +21,22 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Bundled locally (vendored from the Flutter SDK's own
+  # bin/cache/artifacts/material_fonts/, Apache 2.0 -- see assets/fonts/LICENSE.txt)
+  # instead of relying on the default Material theme, which otherwise makes
+  # CanvasKit fetch Roboto from fonts.gstatic.com at runtime. On a network
+  # that can't reach Google's font CDN (confirmed unreachable in this
+  # project's dev/VM environments) that fetch fails silently and ALL text
+  # in the app renders blank -- bundling removes the runtime dependency
+  # entirely, same glyphs either way.
+  fonts:
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Roboto-Italic.ttf
+          style: italic
