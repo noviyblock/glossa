@@ -117,18 +117,18 @@ class _HomePageState extends State<HomePage> {
       // a likely contributor to the hand-keypoint dropout seen in live
       // sessions (see TRIAGE_MEMORY_GAZETA.md).
       //
-      // 720x1280 (9:16 portrait), not 16:9 landscape -- verified via PyAV
-      // against the actual reference clips (models/gloss_clips/*.mp4,
-      // n=20 sample): 17/20 are 480x854 (~9:16), matching Slovo's
-      // phone-shot-vertical-video source convention, not a webcam-style
-      // landscape frame. The model was trained on that framing; a
-      // landscape capture wastes most of its frame on empty left/right
-      // space the model never saw during training. This is `ideal`, not
-      // `exact` -- a laptop webcam with a fixed landscape sensor can't
-      // actually reorient itself and will just deliver its native
-      // landscape frame (browser does not letterbox to fake portrait),
-      // which is fine: drawImage below still scales whatever the camera
-      // delivers into this canvas.
+      // REVERTED from a 720x1280 portrait attempt (matching the reference
+      // clips' ~9:16 training framing) back to plain 1280x720 landscape --
+      // real-camera testing showed it made tracking WORSE, not better: on a
+      // fixed-sensor landscape webcam the browser can't actually reorient,
+      // so _sendFrame's center-crop was cutting a portrait window out of a
+      // landscape frame, chopping off hands that moved to either side
+      // during signing (RSL routinely uses lateral hand movement) instead
+      // of just "showing less of the sides" as assumed. Training-framing
+      // match is a real, separate concern, but it doesn't matter if the
+      // hands performing the sign are literally outside the captured
+      // region. Landscape + full-frame (no crop) keeps the whole arm span
+      // visible, which is what real usage confirmed tracking well before.
       // frameRate ideal:30 is a cheap, standards-based nudge against motion
       // blur: most webcams' auto-exposure caps exposure time at ~1/fps, so
       // asking for a higher fps indirectly asks for shorter exposure on
@@ -139,8 +139,8 @@ class _HomePageState extends State<HomePage> {
       final stream = await web.window.navigator.mediaDevices
           .getUserMedia(web.MediaStreamConstraints(
             video: web.MediaTrackConstraints(
-              width: web.ConstrainULongRange(ideal: 720),
-              height: web.ConstrainULongRange(ideal: 1280),
+              width: web.ConstrainULongRange(ideal: 1280),
+              height: web.ConstrainULongRange(ideal: 720),
               frameRate: web.ConstrainDoubleRange(ideal: 30),
             ),
             audio: false.toJS,
@@ -156,8 +156,8 @@ class _HomePageState extends State<HomePage> {
       // Matches the requested ideal above -- drawImage (in _sendFrame)
       // scales whatever the camera actually delivered into this canvas
       // regardless, so this stays safe even if the camera only supports
-      // a different resolution or falls back to landscape.
-      _canvas = web.HTMLCanvasElement()..width = 720..height = 1280;
+      // less than 1280x720.
+      _canvas = web.HTMLCanvasElement()..width = 1280..height = 720;
       if (mounted) setState(() => _cameraActive = true);
       await _connectRslWs();
       // Poll frequently (not just every 100ms) so the next frame goes out
@@ -222,13 +222,12 @@ class _HomePageState extends State<HomePage> {
     final ctx = _canvas!.getContext('2d') as web.CanvasRenderingContext2D?;
     if (ctx == null) return;
     // Center-crop (not stretch) the source video to the canvas's aspect
-    // ratio before scaling. Needed because the canvas targets a 9:16
-    // portrait aspect (see _startCamera's comment -- matches the reference
-    // clips' training framing) but a fixed-sensor landscape webcam can't
-    // actually deliver portrait video, so _video's natural frame is often
-    // still 16:9 -- drawing that whole frame into a 9:16 canvas without
-    // cropping would squash people horizontally instead of just showing
-    // less of the sides, corrupting keypoint geometry sent to the model.
+    // ratio before scaling. Canvas target is back to 1280x720 (see
+    // _startCamera), same as the requested capture, so in the common case
+    // this crops little to nothing -- kept as a safety net for a webcam
+    // whose native aspect doesn't match (e.g. 4:3), so it gets a small crop
+    // instead of a full-frame stretch, without the earlier portrait-target
+    // version's problem of chopping a wide fraction of the frame off.
     final vw = _video!.videoWidth.toDouble();
     final vh = _video!.videoHeight.toDouble();
     final cw = _canvas!.width.toDouble();
@@ -573,41 +572,45 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(width: 10),
         ],
       ),
+      // 2x2 quadrants on wide screens: top-left camera (person framed --
+      // head/hands/chest, via the framing guide), bottom-left the skeleton
+      // rendered on its own (not overlaid), top-right recognized
+      // gestures + the LLM-produced sentence chat, bottom-right the
+      // outgoing text->RSL panel (typed message -> gloss/video, existing
+      // _glossChatPanel/_textInputPanel -- the remaining major feature not
+      // otherwise placed by the 3 quadrants that were specified).
       body: isWide
           ? Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              Expanded(flex: 3, child: _leftColumn(cs)),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Expanded(child: _cameraPanel(cs)),
+                  Divider(height: 1, color: cs.outlineVariant),
+                  Expanded(child: _skeletonPanel(cs)),
+                ]),
+              ),
               VerticalDivider(width: 1, color: cs.outlineVariant),
-              Expanded(flex: 2, child: _rightColumn(cs)),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Expanded(child: _recognitionChatPanel(cs)),
+                  Divider(height: 1, color: cs.outlineVariant),
+                  Expanded(child: _glossChatPanel(cs)),
+                  _textInputPanel(cs),
+                ]),
+              ),
             ])
           : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               SizedBox(height: 220, child: _cameraPanel(cs)),
               Divider(height: 1, color: cs.outlineVariant),
-              SizedBox(height: 240, child: _glossChatPanel(cs)),
+              SizedBox(height: 180, child: _skeletonPanel(cs)),
               Divider(height: 1, color: cs.outlineVariant),
               SizedBox(height: 240, child: _recognitionChatPanel(cs)),
+              Divider(height: 1, color: cs.outlineVariant),
+              SizedBox(height: 240, child: _glossChatPanel(cs)),
               Divider(height: 1, color: cs.outlineVariant),
               _textInputPanel(cs),
             ]),
     );
   }
-
-  Widget _leftColumn(ColorScheme cs) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Flexible(flex: 5, child: _cameraPanel(cs)),
-      Divider(height: 1, color: cs.outlineVariant),
-      Expanded(flex: 5, child: _glossChatPanel(cs)),
-    ],
-  );
-
-  Widget _rightColumn(ColorScheme cs) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Expanded(child: _recognitionChatPanel(cs)),
-      Divider(height: 1, color: cs.outlineVariant),
-      _textInputPanel(cs),
-    ],
-  );
 
   // ── Panel 1: Camera with skeleton overlay ────────────────────────────────── //
 
@@ -637,22 +640,16 @@ class _HomePageState extends State<HomePage> {
                 ),
         ),
 
-        // ── Framing guide — "stand here" hint, shown until a person is
-        // confidently tracked. The model was trained on Slovo clips framed
-        // roughly waist-up, centered, frontal — matching that framing
-        // reduces the live/train distribution gap more than any inference
-        // post-processing can. Fades out once real tracking kicks in. ──── //
+        // ── Framing guide — "stand here" hint: head/hands/chest inside the
+        // box, shown until a person is confidently tracked. The model was
+        // trained on Slovo clips framed roughly waist-up, centered, frontal
+        // — matching that framing reduces the live/train distribution gap
+        // more than any inference post-processing can. Fades out once real
+        // tracking kicks in. The skeleton itself now renders in its own
+        // panel (see _skeletonPanel) instead of overlaid here, so this
+        // panel stays a clean, undistorted view of the actual camera feed. ── //
         if (_cameraActive && !_showSkeleton)
           const CustomPaint(painter: _FramingGuidePainter()),
-
-        // ── Skeleton overlay (animated at 30fps via _animTimer) ──────────── //
-        if (_cameraActive && _showSkeleton && _displayKp != null)
-          CustomPaint(
-            painter: _SkeletonPainter(
-              keypoints: _displayKp!,
-              personDetected: _showSkeleton,
-            ),
-          ),
 
         // ── Live gloss chips (top of frame) ──────────────────────────────── //
         if (_liveGlosses.isNotEmpty)
@@ -750,6 +747,41 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
       ],
+    );
+  }
+
+  // ── Panel 1b: Skeleton (own quadrant, not overlaid on the camera) ───────── //
+
+  Widget _skeletonPanel(ColorScheme cs) {
+    return ColoredBox(
+      color: Colors.black,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (_showSkeleton && _displayKp != null)
+            CustomPaint(
+              painter: _SkeletonPainter(
+                keypoints: _displayKp!,
+                personDetected: _showSkeleton,
+              ),
+            )
+          else
+            Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.accessibility_new, size: 36, color: cs.outline),
+                const SizedBox(height: 6),
+                Text(
+                  _cameraActive ? 'Ищу человека в кадре…' : 'Скелет',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+              ]),
+            ),
+          const Positioned(
+            top: 6, left: 8,
+            child: Text('Точки жеста', style: TextStyle(color: Colors.white54, fontSize: 11)),
+          ),
+        ],
+      ),
     );
   }
 
