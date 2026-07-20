@@ -44,14 +44,31 @@ _session_last_access: dict[str, float] = {}
 _cleanup_task: asyncio.Task | None = None
 
 
+def _evict_session(sid: str) -> bool:
+    """Drop all per-session state for `sid` (GestureSegmenter/
+    KeypointSmoother/TrackState/lock/diag counter). Returns False (does
+    NOT evict) if the session's lock is currently held -- deleting a
+    session out from under an in-flight /process_frame would hand that
+    request a lock object no longer reachable by anyone else, not a clean
+    reset. Shared by the idle-TTL sweep and /reset_session so both use
+    the exact same "is it safe to evict right now" rule.
+    """
+    lock = _session_locks.get(sid)
+    if lock is not None and lock.locked():
+        return False
+    _session_segmenters.pop(sid, None)
+    _session_smoothers.pop(sid, None)
+    _session_tracks.pop(sid, None)
+    _session_locks.pop(sid, None)
+    _diag_counters.pop(sid, None)
+    _session_last_access.pop(sid, None)
+    return True
+
+
 async def _cleanup_idle_sessions() -> None:
-    """Background sweep: evict per-session state (GestureSegmenter/
-    KeypointSmoother/TrackState/lock/diag counter) for sessions idle longer
+    """Background sweep: evict per-session state for sessions idle longer
     than SESSION_IDLE_TTL. Without this, these dicts grow for as long as the
     process runs — every session_id that ever connected stays resident.
-
-    Skips a session if its lock is currently held (mid-request) rather than
-    deleting out from under it — picked up on the next sweep instead.
     """
     while True:
         await asyncio.sleep(cfg.SESSION_CLEANUP_INTERVAL)
@@ -62,18 +79,7 @@ async def _cleanup_idle_sessions() -> None:
         ]
         if not stale:
             continue
-        evicted = 0
-        for sid in stale:
-            lock = _session_locks.get(sid)
-            if lock is not None and lock.locked():
-                continue
-            _session_segmenters.pop(sid, None)
-            _session_smoothers.pop(sid, None)
-            _session_tracks.pop(sid, None)
-            _session_locks.pop(sid, None)
-            _diag_counters.pop(sid, None)
-            _session_last_access.pop(sid, None)
-            evicted += 1
+        evicted = sum(1 for sid in stale if _evict_session(sid))
         if evicted:
             logger.info("Session cleanup: evicted %d idle session(s) (TTL=%ds)",
                         evicted, cfg.SESSION_IDLE_TTL)
@@ -170,6 +176,33 @@ async def readiness():
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"service": "cv-service", "status": "loading"},
     )
+
+
+# ── REST endpoint: explicit session reset ────────────────────────────────── #
+
+@app.post("/reset_session")
+async def reset_session(body: dict[str, Any]):
+    """Drop this session_id's GestureSegmenter/TrackState/KeypointSmoother
+    immediately instead of waiting up to SESSION_IDLE_TTL (5 min).
+
+    Without this, a session_id reused across unrelated recognition runs
+    (e.g. a video-upload session followed by a live-camera session using
+    the same session_id, which the client currently does) inherits
+    whatever mid-gesture state GestureSegmenter was left in by the
+    PREVIOUS run -- e.g. still ACTIVE and waiting for an offset that never
+    comes, silently absorbing new frames into a stale segment instead of
+    starting fresh. Symptom: live recognition looks completely dead after
+    switching from video-upload/another mode, with nothing in the logs
+    suggesting why. Called by api_gateway's WS handler on "end_session".
+
+    Body: {"session_id": str}
+    """
+    session_id = body.get("session_id", "")
+    if not session_id:
+        return JSONResponse(status_code=400, content={"error": "session_id required"})
+    evicted = _evict_session(session_id)
+    logger.info("session=%s reset_session evicted=%s", session_id[:8], evicted)
+    return {"evicted": evicted}
 
 
 # ── REST endpoint (single frame) ─────────────────────────────────────────── #

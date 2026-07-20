@@ -76,6 +76,11 @@ class _HomePageState extends State<HomePage> {
   List<_GlossItem> _liveGlosses = [];
   bool _liveGlossesPreview = false; // true = early/provisional, not the final classification
   String _rslAudio = '';
+  // Whether a recognized RSL sentence gets read aloud automatically as
+  // soon as it's ready, for a hearing person who'd rather listen than
+  // read the chat -- on by default (matches behavior before this toggle
+  // existed), off lets them mute it without losing the text.
+  bool _autoVoiceEnabled = true;
   int? _latencyMs;
   DateTime? _lastFrameSent;
   // Prevents frame queue buildup: only one frame in-flight at a time
@@ -162,9 +167,16 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _startCamera() async {
     // Live camera takes over the skeleton panel -- stop any typed-text
-    // playback so the two don't write _displayKp at the same time.
+    // playback so the two don't write _displayKp at the same time, and
+    // clear any frozen "reviewing a completed gesture" state left over
+    // from a PREVIOUS session (video-upload or an earlier camera run) --
+    // without this, _reviewingGesture stays true until the first new
+    // gesture completes, so the panel keeps showing the old gesture's
+    // frames instead of live tracking right after starting.
     _textSkeletonTimer?.cancel();
     _textSkeletonTimer = null;
+    _reviewingGesture = false;
+    _recognizedGestureFrames = [];
     try {
       // Ideal, not exact -- requests the higher resolution but falls back
       // gracefully to whatever the camera actually supports instead of
@@ -253,8 +265,15 @@ class _HomePageState extends State<HomePage> {
   Future<void> _startVideoFile(web.File file) async {
     // Live camera and file playback both drive the same skeleton panel --
     // stop the other one first so they don't fight over _displayKp/_video.
+    // Also clear any frozen "reviewing a completed gesture" state left
+    // over from a previous session (see _startCamera's comment) --
+    // video-upload mode doesn't show the skeleton panel at all
+    // (_visualOutputPanel), but the stale flag would still affect
+    // whatever session runs after this one.
     _textSkeletonTimer?.cancel();
     _textSkeletonTimer = null;
+    _reviewingGesture = false;
+    _recognizedGestureFrames = [];
     try {
       final url = web.URL.createObjectURL(file);
       _videoObjectUrl = url;
@@ -499,7 +518,7 @@ class _HomePageState extends State<HomePage> {
 
       case 'audio':
         setState(() => _rslAudio = payload['wav'] as String? ?? '');
-        _playAudio(_rslAudio);
+        if (_autoVoiceEnabled) _playAudio(_rslAudio);
         break;
 
       case 'video':
@@ -529,7 +548,7 @@ class _HomePageState extends State<HomePage> {
           if (video != null && video.isNotEmpty) _signVideoB64 = video;
         });
         _scrollToBottom(_rslScrollCtrl);
-        if (audio != null && audio.isNotEmpty) _playAudio(audio);
+        if (_autoVoiceEnabled && audio != null && audio.isNotEmpty) _playAudio(audio);
         if (hasSkeletons) _playTextSkeleton(peerSkeletons);
         break;
     }
@@ -849,6 +868,14 @@ class _HomePageState extends State<HomePage> {
           ],
         ]),
         actions: [
+          IconButton(
+            tooltip: _autoVoiceEnabled
+                ? 'Озвучка распознанных жестов включена (нажмите, чтобы выключить)'
+                : 'Озвучка выключена (нажмите, чтобы включить)',
+            icon: Icon(_autoVoiceEnabled ? Icons.volume_up : Icons.volume_off, size: 20),
+            color: _autoVoiceEnabled ? cs.primary : cs.onSurfaceVariant,
+            onPressed: () => setState(() => _autoVoiceEnabled = !_autoVoiceEnabled),
+          ),
           if (_kCallFeatureEnabled)
             _callId != null
                 ? Padding(

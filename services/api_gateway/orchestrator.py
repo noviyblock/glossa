@@ -96,6 +96,50 @@ class Orchestrator:
     async def delete_session(self, session_id: str) -> None:
         await self._redis.delete(f"gw:session:{session_id}")
 
+    async def end_recognition_session(self, session_id: str) -> None:
+        """Called when a camera/video-upload recognition run ends (WS
+        "end_session") — resets cv_service's per-frame state (see
+        reset_cv_session) and clears this session's pending_positions/
+        last_gesture_ts, so a gesture buffered-but-not-yet-flushed when the
+        user stopped doesn't leak into a later, unrelated run using the
+        same session_id.
+
+        Deliberately does NOT touch/clear "history" — dialogue context is
+        conversation-level (see process_frame's and translate_sync's
+        shared, speaker-tagged history) and meant to survive a camera
+        stop/restart: a hearing person's question typed while the camera
+        was off should still inform disambiguation of the next thing the
+        signer shows. This used to call delete_session() here, wiping the
+        whole Redis blob including history on every stop — replaced,
+        since that undermined the point of sharing history across modes.
+        """
+        await self.reset_cv_session(session_id)
+        session = await self._get_session(session_id)
+        if session and (session.get("pending_positions") or session.get("last_gesture_ts")):
+            await self._set_session(session_id, {
+                **session, "pending_positions": [], "last_gesture_ts": 0.0,
+            })
+
+    async def reset_cv_session(self, session_id: str) -> None:
+        """Tell cv_service to drop this session_id's GestureSegmenter/
+        TrackState/KeypointSmoother right away instead of waiting up to
+        its own SESSION_IDLE_TTL. Without this, a session_id reused across
+        unrelated recognition runs (video-upload, then live camera, same
+        session_id) inherits stale mid-gesture state from whatever ran
+        before it -- see cv_service/main.py's /reset_session docstring for
+        the full story. Best-effort: a failure here just means the old
+        TTL-based cleanup eventually handles it, so it's logged and
+        swallowed rather than raised (this runs from the WS "end_session"
+        path, which shouldn't fail a clean disconnect over it).
+        """
+        try:
+            resp = await self._http.post(
+                f"{CV_SERVICE_URL}/reset_session", json={"session_id": session_id},
+            )
+            resp.raise_for_status()
+        except Exception as exc:
+            logger.warning("CV reset_session error session=%s: %s", session_id, exc)
+
     # ── Pipeline: RSL → Text ──────────────────────────────────────────────── #
 
     async def process_frame(self, session_id: str, frame_b64: str) -> dict:

@@ -425,7 +425,16 @@ async def ws_translate(ws: WebSocket, mode: str):
             elif msg_type == "end_session":
                 if session_id:
                     _sessions.unregister(session_id)
-                    await _orchestrator.delete_session(session_id)
+                    # NOT delete_session() -- that used to wipe this
+                    # session_id's whole Redis blob including dialogue
+                    # "history", which is meant to survive a camera
+                    # stop/restart (see end_recognition_session's
+                    # docstring). This also resets cv_service's
+                    # GestureSegmenter/TrackState immediately instead of
+                    # leaving stale mid-gesture state for up to 5 minutes
+                    # (SESSION_IDLE_TTL) for the next unrelated run reusing
+                    # the same session_id to inherit.
+                    await _orchestrator.end_recognition_session(session_id)
                 break
 
             elif msg_type == "ping":
