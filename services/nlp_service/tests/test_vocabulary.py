@@ -71,6 +71,26 @@ def test_constrain_empty_input_returns_empty(tmp_path: Path) -> None:
     assert vocab.constrain("НЕСУЩЕСТВУЮЩЕЕСЛОВО") == ""
 
 
+def test_constrain_tolerates_pipe_separated_output(tmp_path: Path) -> None:
+    """Real regression: model output 'Золото|корона|крест' for a 3-word
+    answer where all three words are valid vocabulary entries -- plain
+    whitespace .split() treated the whole string as one unmatched token,
+    so the answer came back empty despite being correct."""
+    vocab = _make_vocab(tmp_path, {"золото": 0, "корона": 1, "крест": 2})
+
+    result = vocab.constrain("Золото|корона|крест")
+
+    assert result == "ЗОЛОТО КОРОНА КРЕСТ"
+
+
+def test_constrain_tolerates_newline_separated_output(tmp_path: Path) -> None:
+    vocab = _make_vocab(tmp_path, {"золото": 0, "корона": 1})
+
+    result = vocab.constrain("золото\nкорона")
+
+    assert result == "ЗОЛОТО КОРОНА"
+
+
 def test_constrain_is_case_and_punctuation_insensitive(tmp_path: Path) -> None:
     vocab = _make_vocab(tmp_path, {"С днем рождения!": 0})
 

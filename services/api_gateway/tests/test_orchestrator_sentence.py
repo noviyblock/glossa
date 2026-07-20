@@ -38,15 +38,26 @@ class _FakeResponse:
 class _CvHTTPClient:
     """Returns canned CV /process_frame responses in call order; NLP
     /translate_sequence_topk (sentence flush) always echoes a fixed stub
-    translation and records what it was called with."""
+    translation and records what it was called with. /reset_session
+    echoes `reset_session_glosses` (default []), matching cv_service's
+    real /reset_session response shape (see cv_service/main.py) -- lets
+    tests simulate a gesture that was still ACTIVE and got force-flushed
+    when the session ended (see test_end_recognition_session_buffers_a_
+    force_flushed_trailing_gesture)."""
 
-    def __init__(self, cv_responses: list[dict[str, Any]]) -> None:
+    def __init__(
+        self, cv_responses: list[dict[str, Any]],
+        reset_session_glosses: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._cv_responses = list(cv_responses)
+        self._reset_session_glosses = reset_session_glosses or []
         self.nlp_calls: list[dict[str, Any]] = []
 
     async def post(self, url: str, json: dict[str, Any] | None = None) -> _FakeResponse:
         if url == f"{CV_SERVICE_URL}/process_frame":
             return _FakeResponse(self._cv_responses.pop(0))
+        if url == f"{CV_SERVICE_URL}/reset_session":
+            return _FakeResponse({"evicted": True, "glosses": self._reset_session_glosses})
         if url == f"{NLP_SERVICE_URL}/translate_sequence_topk":
             self.nlp_calls.append(json or {})
             return _FakeResponse({"translation": "stub translation"})
@@ -72,9 +83,18 @@ class _FakeRedis:
         pass
 
 
-def _cv_frame(gloss: str, prob: float) -> dict[str, Any]:
+def _cv_frame(gloss: str, prob: float, extra: list[tuple[str, float]] | None = None) -> dict[str, Any]:
+    # cv_service always returns TOP_K=3 candidates in practice (see
+    # gesture_classifier.py) -- `extra` lets tests express a realistic
+    # runner-up shape instead of a single-item list, which matters for
+    # _gesture_is_confident's margin-based exception (see
+    # test_standout_single_candidate_below_threshold_is_still_buffered /
+    # test_ambiguous_low_confidence_with_close_runnerup_is_not_buffered).
+    candidates = [{"gloss": gloss, "prob": prob}]
+    if extra:
+        candidates += [{"gloss": g, "prob": p} for g, p in extra]
     return {
-        "glosses": [{"gloss": gloss, "prob": prob}],
+        "glosses": candidates,
         "person_detected": True,
         "gesture_active": False,
         "preview": False,
@@ -83,12 +103,17 @@ def _cv_frame(gloss: str, prob: float) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_low_confidence_gloss_is_not_buffered() -> None:
-    """A completed 'gesture' below _MIN_CONFIDENCE must not enter
-    pending_positions -- it's noise, not a real classification (same gate
-    the client-side display filter now mirrors, see punch-list item 1)."""
+    """A completed 'gesture' below _MIN_CONFIDENCE, with a close runner-up
+    (genuine ambiguity, not a standout) must not enter pending_positions --
+    it's noise, not a real classification (same gate the client-side
+    display filter now mirrors, see punch-list item 1). The close runner-up
+    also matters here: it keeps _gesture_is_confident's margin-based
+    exception from kicking in, which is exactly what
+    test_ambiguous_low_confidence_with_close_runnerup_is_not_buffered
+    checks explicitly."""
     below = _MIN_CONFIDENCE - 0.01
     assert below >= 0.0, "test assumes _MIN_CONFIDENCE > 0"
-    http = _CvHTTPClient([_cv_frame("шум", below)])
+    http = _CvHTTPClient([_cv_frame("шум", below, extra=[("шум2", below - 0.05), ("шум3", below - 0.10)])])
     orch = Orchestrator(redis=_FakeRedis(), http=http)
 
     result = await orch.process_frame("s1", "fake-frame-b64")
@@ -98,6 +123,54 @@ async def test_low_confidence_gloss_is_not_buffered() -> None:
     session = await orch._get_session("s1")
     assert session["pending_positions"] == []
     assert http.nlp_calls == []  # never even attempted a flush
+
+
+@pytest.mark.asyncio
+async def test_standout_single_candidate_below_threshold_is_still_buffered() -> None:
+    """Real regression: a genuine, unambiguous gesture ('память') landed at
+    ~0.30 confidence -- below _MIN_CONFIDENCE, but a clear standout over
+    both runner-ups -- and was wrongly rejected outright. Normal for a
+    200-way classifier, where even a correct top-1 rarely dominates the
+    softmax the way it would in a small-class problem.
+    _gesture_is_confident's margin path should let this through."""
+    http = _CvHTTPClient([_cv_frame("память", 0.30, extra=[("привет", 0.02), ("пока", 0.01)])])
+    orch = Orchestrator(redis=_FakeRedis(), http=http)
+
+    result = await orch.process_frame("s9", "fake-frame-b64")
+
+    assert result["pending_positions"] == [[
+        {"gloss": "память", "prob": 0.30},
+        {"gloss": "привет", "prob": 0.02},
+        {"gloss": "пока", "prob": 0.01},
+    ]]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_low_confidence_with_close_runnerup_is_not_buffered() -> None:
+    """A low top-1 that's NOT a standout (close runner-up) must still be
+    rejected -- this is exactly the transitional-hand-movement noise
+    _MIN_CONFIDENCE was originally raised to filter out, and the margin
+    exception must not accidentally reopen that hole."""
+    http = _CvHTTPClient([_cv_frame("шум", 0.28, extra=[("шум2", 0.25)])])
+    orch = Orchestrator(redis=_FakeRedis(), http=http)
+
+    result = await orch.process_frame("s10", "fake-frame-b64")
+
+    assert "pending_positions" not in result
+
+
+@pytest.mark.asyncio
+async def test_below_margin_floor_is_never_buffered_even_as_sole_candidate() -> None:
+    """A very low top-1 (below _MIN_CONFIDENCE_MARGIN_FLOOR) must be
+    rejected even as the sole/standout candidate -- the margin exception
+    isn't a way to accept near-zero-confidence noise, only a way to accept
+    a below-_MIN_CONFIDENCE but still reasonably confident standout."""
+    http = _CvHTTPClient([_cv_frame("шум", 0.10)])
+    orch = Orchestrator(redis=_FakeRedis(), http=http)
+
+    result = await orch.process_frame("s11", "fake-frame-b64")
+
+    assert "pending_positions" not in result
 
 
 @pytest.mark.asyncio
@@ -220,3 +293,64 @@ async def test_end_recognition_session_with_nothing_pending_is_a_noop() -> None:
     flush_result = await orch.end_recognition_session("s8")
 
     assert flush_result is None
+
+
+@pytest.mark.asyncio
+async def test_end_recognition_session_buffers_a_force_flushed_trailing_gesture() -> None:
+    """Real regression: short uploaded clips recognized nothing at all --
+    cv_service's segmenter was still ACTIVE (never reached its natural
+    offset) when the clip ended, so /reset_session now force-flushes and
+    classifies it (see cv_service's docstring) instead of discarding it.
+    end_recognition_session must fold that trailing gesture into
+    pending_positions (if confident enough) and flush the whole thing,
+    not just the gestures that had already completed naturally."""
+    above = _MIN_CONFIDENCE + 0.5
+    http = _CvHTTPClient([], reset_session_glosses=[{"gloss": "память", "prob": above}])
+    orch = Orchestrator(redis=_FakeRedis(), http=http)
+    # Nothing buffered yet via process_frame -- the WHOLE clip was one
+    # gesture that never closed naturally, only force-flushed on reset.
+
+    flush_result = await orch.end_recognition_session("s12")
+
+    assert flush_result is not None
+    assert flush_result["translation"] == "stub translation"
+    assert len(http.nlp_calls) == 1
+    assert http.nlp_calls[0]["positions"] == [[{"gloss": "память", "prob": above}]]
+
+
+@pytest.mark.asyncio
+async def test_end_recognition_session_drops_a_low_confidence_trailing_gesture() -> None:
+    """A force-flushed trailing gesture still has to clear
+    _gesture_is_confident, same as any other gesture -- reset_session
+    shouldn't become a backdoor around the confidence gate."""
+    http = _CvHTTPClient([], reset_session_glosses=[
+        {"gloss": "шум", "prob": 0.10},
+    ])
+    orch = Orchestrator(redis=_FakeRedis(), http=http)
+
+    flush_result = await orch.end_recognition_session("s13")
+
+    assert flush_result is None
+    assert http.nlp_calls == []
+
+
+@pytest.mark.asyncio
+async def test_end_recognition_session_combines_pending_and_trailing_gesture() -> None:
+    """A sentence with some gestures already buffered normally PLUS one
+    more that only closed via force-flush on reset -- both must end up in
+    the same translated sentence, not just the trailing one."""
+    above = _MIN_CONFIDENCE + 0.5
+    http = _CvHTTPClient(
+        [_cv_frame("привет", above)],
+        reset_session_glosses=[{"gloss": "пока", "prob": above}],
+    )
+    orch = Orchestrator(redis=_FakeRedis(), http=http)
+
+    await orch.process_frame("s14", "fake-frame-b64")
+    flush_result = await orch.end_recognition_session("s14")
+
+    assert flush_result is not None
+    assert http.nlp_calls[0]["positions"] == [
+        [{"gloss": "привет", "prob": above}],
+        [{"gloss": "пока", "prob": above}],
+    ]

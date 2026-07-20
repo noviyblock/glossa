@@ -195,14 +195,41 @@ async def reset_session(body: dict[str, Any]):
     switching from video-upload/another mode, with nothing in the logs
     suggesting why. Called by api_gateway's WS handler on "end_session".
 
+    Before evicting, if the segmenter is still ACTIVE (a gesture in
+    progress that never reached its natural offset), force-classify
+    whatever was captured instead of silently throwing it away. Real
+    regression: short (~a couple seconds) uploaded clips recognized
+    nothing at all -- real DIAG logs showed genuine gestures regularly
+    running 100+ frames before naturally closing (offset_streak kept
+    getting reset by ordinary motion noise, only settling by luck or by
+    hitting GESTURE_MAX_FRAMES), so a short clip's frames simply ran out
+    first, evicting an ACTIVE segment with a real, classifiable gesture in
+    it and never attempting a classification at all.
+
     Body: {"session_id": str}
+    Returns: {"evicted": bool, "glosses": list[dict]} -- glosses is the
+    force-flushed classification (top-3, same shape as /process_frame's),
+    or [] if nothing was mid-gesture.
     """
     session_id = body.get("session_id", "")
     if not session_id:
         return JSONResponse(status_code=400, content={"error": "session_id required"})
+
+    glosses: list[dict] = []
+    seg = _session_segmenters.get(session_id)
+    if seg is not None:
+        lock = _session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            window = seg.force_flush()
+        if window is not None:
+            norm_win = _normalizer(window)
+            glosses = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+            logger.info("session=%s force_flush on reset top1=%s conf=%.2f",
+                        session_id[:8], glosses[0]["gloss"], glosses[0]["prob"])
+
     evicted = _evict_session(session_id)
     logger.info("session=%s reset_session evicted=%s", session_id[:8], evicted)
-    return {"evicted": evicted}
+    return {"evicted": evicted, "glosses": glosses}
 
 
 # ── REST endpoint (single frame) ─────────────────────────────────────────── #

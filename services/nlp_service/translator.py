@@ -57,8 +57,17 @@ SEQ_TOPK_SYSTEM_PROMPT = (
     "русское предложение. Если какая-то позиция явно не вписывается по "
     "смыслу ни одним из вариантов, можешь её проигнорировать, если без неё "
     "предложение получается более естественным. \n"
-    "Если дан контекст (предыдущие фразы диалога), используй его для "
-    "связности с разговором. \n"
+    "ВАЖНО: используй ТОЛЬКО те слова и смыслы, что даны в вариантах выше "
+    "(плюс обычные грамматические связки/окончания/предлоги, нужные для "
+    "связного русского предложения). НЕ добавляй новые темы, факты, "
+    "детали или слова, которых нет ни в одном из вариантов ни по одной "
+    "позиции — даже если без них предложение кажется неполным. Если "
+    "вариантов слишком мало или они не складываются в осмысленное "
+    "предложение, переведи буквально то, что есть, не дописывая остальное "
+    "от себя. \n"
+    "Если дан контекст (предыдущие фразы диалога), используй его только "
+    "для выбора связного ПО СМЫСЛУ варианта на каждую позицию — не для "
+    "заимствования тем или слов из контекста в сам перевод. \n"
     "ВАЖНО: отвечай ТОЛЬКО на русском языке. \n"
     "Только перевод, без пояснений."
 )
@@ -112,6 +121,11 @@ REVERSE_SYSTEM_PROMPT_TEMPLATE = (
 )
 
 _CHINESE_RE = re.compile(r"[一-鿿]+")
+
+# See translate_reverse -- a correct answer is a handful of gloss words,
+# never a full sentence, so it doesn't need anywhere near the generic
+# generate() budget.
+_REVERSE_MAX_NEW_TOKENS = 40
 
 
 class Translator:
@@ -172,7 +186,7 @@ class Translator:
 
     # ------------------------------------------------------------------ #
 
-    def generate(self, system_prompt: str, user_message: str) -> str:
+    def generate(self, system_prompt: str, user_message: str, max_new_tokens: int | None = None) -> str:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": user_message},
@@ -187,7 +201,7 @@ class Translator:
         with torch.no_grad():
             outputs = self._model.generate(
                 **inputs,
-                max_new_tokens=self._max_new_tokens,
+                max_new_tokens=max_new_tokens or self._max_new_tokens,
                 do_sample=False,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
@@ -229,7 +243,14 @@ class Translator:
         prompt = REVERSE_SYSTEM_PROMPT_TEMPLATE.format(
             n=len(candidates), vocab="\n".join(candidates),
         )
-        raw = self.generate(prompt, russian_text)
+        # A correct answer is always short (a handful of gloss words, not
+        # a full sentence) -- capped well below the generic
+        # self._max_new_tokens=128 budget used for free-form translation.
+        # If the model doesn't cleanly emit EOS for this task (observed:
+        # generation running the full budget rather than stopping early),
+        # this bounds the worst case instead of paying for 128 tokens of
+        # decoding no matter what.
+        raw = self.generate(prompt, russian_text, max_new_tokens=_REVERSE_MAX_NEW_TOKENS)
         constrained = self._vocab.constrain(raw)
         if raw.strip() and not constrained:
             logger.info(

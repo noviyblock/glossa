@@ -101,8 +101,21 @@ class GlossVocabulary:
     def constrain(self, llm_output: str) -> str:
         """Keep only tokens/phrases from llm_output that literally match a
         vocabulary entry, in order, uppercased (matching the gloss-token
-        convention the rest of the pipeline expects)."""
-        tokens = llm_output.strip().split()
+        convention the rest of the pipeline expects).
+
+        Real regression: for a multi-word answer the model sometimes
+        ignores the "через пробел" instruction and separates words with
+        "|" or a newline instead (observed: 'Золото|корона|крест' for
+        candidates ЗОЛОТО/КОРОНА/КРЕСТ -- all three are valid vocabulary
+        words, but plain `.split()` treated the whole pipe-joined string
+        as one token, which matched nothing, so the answer silently came
+        back empty despite being "right"). Splitting on any of the
+        delimiters a model plausibly uses instead of a space -- pipe,
+        comma, semicolon, slash, middle dot, newline -- makes this
+        tolerant of that formatting drift without weakening the actual
+        vocabulary check that follows.
+        """
+        tokens = [t for t in re.split(r"[\s|,;/·•]+", llm_output.strip()) if t]
         kept: list[str] = []
         i = 0
         while i < len(tokens):

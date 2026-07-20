@@ -48,14 +48,30 @@ _CONSUMER_GROUP     = "api-gateway"
 _CONSUMER_NAME      = "gateway-0"
 
 # Skip buffering when confidence is too low — usually means no person in
-# frame or random noise classified by the model. Raised from the earlier
-# diagnostics-only 0.15: real testing showed transitional hand movement
-# *between* two intended signs was regularly scoring 0.15-0.30 and getting
-# buffered as a spurious extra "gesture" alongside the real ones, which the
-# T9 sequence-disambiguation LLM then dutifully wove into the sentence
-# instead of ignoring -- the fix belongs here (don't let noise into the
-# buffer in the first place), not in the LLM prompt.
-_MIN_CONFIDENCE = 0.35
+# frame or random noise classified by the model. Raised once from an
+# earlier diagnostics-only 0.15 (real testing showed transitional hand
+# movement *between* two intended signs regularly scoring 0.15-0.30 and
+# getting buffered as a spurious extra "gesture"), then lowered back down
+# from 0.35 to 0.30 after real testing showed the flip side: a genuine,
+# unambiguous gesture ("память") legitimately landing at ~0.30 -- normal
+# for a 200-way classifier, where even a correct top-1 rarely dominates
+# the softmax the way it would in a small-class problem -- was getting
+# rejected outright. 0.30 (not all the way back to 0.15) keeps most of the
+# originally-reported 0.15-0.30 noise band excluded while accepting this
+# real case.
+_MIN_CONFIDENCE = 0.30
+# _gesture_is_confident() also lets a below-_MIN_CONFIDENCE top-1 through
+# if it's a clear standout (a wide margin over the runner-up, or the only
+# candidate at all) rather than treating every sub-threshold result as
+# equally suspect. Still floored at _MIN_CONFIDENCE_MARGIN_FLOOR so it
+# can't fall back to accepting near-zero-confidence noise just because
+# nothing else was close. NOT independently validated against the
+# transitional-movement noise this file's history describes (needs live
+# camera testing, same as task #22's threshold calibration) -- if spurious
+# extra gestures reappear between intended signs, narrow the margin path
+# (or raise _MIN_CONFIDENCE back up) rather than guessing further blind.
+_MIN_CONFIDENCE_MARGIN_FLOOR = 0.20
+_MIN_CONFIDENCE_MARGIN = 0.15
 # Recent dialogue turns given to the LLM as context — now shared across
 # BOTH directions (see process_frame's and translate_sync's history writes
 # below), tagged by speaker, so e.g. a hearing person's question can inform
@@ -63,6 +79,24 @@ _MIN_CONFIDENCE = 0.35
 # keep roughly one full question+answer exchange in view, not just the
 # single most recent line from either side.
 _HISTORY_TURNS  = 4
+
+
+def _gesture_is_confident(glosses: list[dict]) -> bool:
+    """Whether a completed gesture's top-1 classification is trustworthy
+    enough to buffer (see _MIN_CONFIDENCE's comment for the full
+    reasoning). Accepts either a top-1 clearing the flat floor, or a
+    lower-but-still-above-_MIN_CONFIDENCE_MARGIN_FLOOR top-1 that's a
+    clear standout over the runner-up (including the "only one candidate
+    at all" case, which is the strongest possible standout signal)."""
+    if not glosses:
+        return False
+    top1 = glosses[0]["prob"]
+    if top1 >= _MIN_CONFIDENCE:
+        return True
+    if top1 < _MIN_CONFIDENCE_MARGIN_FLOOR:
+        return False
+    top2 = glosses[1]["prob"] if len(glosses) > 1 else 0.0
+    return (top1 - top2) >= _MIN_CONFIDENCE_MARGIN
 
 
 class Orchestrator:
@@ -112,8 +146,19 @@ class Orchestrator:
         whatever gestures were recognized during the upload were silently
         discarded and the client never got a translated result at all
         ("клипы при загрузке распознаются, но нигде не выводится").
+
+        reset_cv_session may also hand back ONE MORE gesture: whatever
+        cv_service's segmenter had still ACTIVE (never reached its natural
+        offset) at the moment of reset, force-classified rather than
+        discarded (see that method's docstring — real regression: short
+        uploaded clips recognizing nothing at all). If confident enough
+        (same gate as process_frame, see _gesture_is_confident), it's
+        appended to pending_positions before flushing, so it's not lost
+        just because the clip ended mid-gesture.
+
         Returns the flush result dict (see flush_pending_sentence) if
-        anything was pending, else None — caller sends it to the client.
+        anything was pending (including this trailing gesture), else
+        None — caller sends it to the client.
 
         Deliberately does NOT touch/clear "history" — dialogue context is
         conversation-level (see process_frame's and translate_sync's
@@ -124,19 +169,26 @@ class Orchestrator:
         whole Redis blob including history on every stop — replaced,
         since that undermined the point of sharing history across modes.
         """
-        await self.reset_cv_session(session_id)
+        trailing_glosses = await self.reset_cv_session(session_id)
         session = await self._get_session(session_id)
-        if not session:
+        if not session and not trailing_glosses:
             return None
+        session = session or {}
+        pending_positions: list[list[dict]] = list(session.get("pending_positions", []))
+        if trailing_glosses and _gesture_is_confident(trailing_glosses):
+            pending_positions.append(trailing_glosses)
+        if pending_positions != session.get("pending_positions", []):
+            session = {**session, "pending_positions": pending_positions}
+            await self._set_session(session_id, session)
         flush_result = None
-        if session.get("pending_positions"):
+        if pending_positions:
             flush_result = await self.flush_pending_sentence(session_id)
             session = await self._get_session(session_id) or session
         if session.get("last_gesture_ts"):
             await self._set_session(session_id, {**session, "last_gesture_ts": 0.0})
         return flush_result
 
-    async def reset_cv_session(self, session_id: str) -> None:
+    async def reset_cv_session(self, session_id: str) -> list[dict]:
         """Tell cv_service to drop this session_id's GestureSegmenter/
         TrackState/KeypointSmoother right away instead of waiting up to
         its own SESSION_IDLE_TTL. Without this, a session_id reused across
@@ -147,14 +199,22 @@ class Orchestrator:
         TTL-based cleanup eventually handles it, so it's logged and
         swallowed rather than raised (this runs from the WS "end_session"
         path, which shouldn't fail a clean disconnect over it).
+
+        Returns the top-3 candidates for a gesture that was still ACTIVE
+        (never reached its natural offset) when this fired, force-flushed
+        and classified by cv_service rather than silently discarded -- see
+        that endpoint's docstring. [] if nothing was mid-gesture, or on
+        any failure.
         """
         try:
             resp = await self._http.post(
                 f"{CV_SERVICE_URL}/reset_session", json={"session_id": session_id},
             )
             resp.raise_for_status()
+            return resp.json().get("glosses", [])
         except Exception as exc:
             logger.warning("CV reset_session error session=%s: %s", session_id, exc)
+            return []
 
     # ── Pipeline: RSL → Text ──────────────────────────────────────────────── #
 
@@ -234,7 +294,7 @@ class Orchestrator:
         pending_changed = False
 
         wav_b64 = ""
-        if glosses and confidence >= _MIN_CONFIDENCE:
+        if glosses and _gesture_is_confident(glosses):
             # A gesture just completed — buffer its top-3 candidates rather
             # than translating it in isolation.
             pending_positions.append(glosses)

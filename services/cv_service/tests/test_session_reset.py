@@ -38,8 +38,22 @@ def _clean_session_dicts():
         d.clear()
 
 
+class _FakeSegmenter:
+    """Stands in for GestureSegmenter in tests that don't care about real
+    segmentation -- reset_session() now calls force_flush() on whatever's
+    in _session_segmenters (see main.py's /reset_session docstring), so a
+    plain object() no longer works here. Defaults to "nothing was
+    mid-gesture" (None), same as the real class when IDLE."""
+
+    def __init__(self, flush_result: object = None) -> None:
+        self.flush_result = flush_result
+
+    def force_flush(self):
+        return self.flush_result
+
+
 def _populate_session(sid: str) -> None:
-    cv_main._session_segmenters[sid] = object()
+    cv_main._session_segmenters[sid] = _FakeSegmenter()
     cv_main._session_smoothers[sid] = object()
     cv_main._session_tracks[sid] = object()
     cv_main._session_locks[sid] = asyncio.Lock()  # unlocked -- real Lock, .locked() must work
@@ -98,8 +112,47 @@ async def test_reset_session_endpoint_evicts_and_returns_status():
 
     result = await cv_main.reset_session({"session_id": "s1"})
 
-    assert result == {"evicted": True}
+    assert result == {"evicted": True, "glosses": []}
     assert "s1" not in cv_main._session_segmenters
+
+
+@pytest.mark.asyncio
+async def test_reset_session_force_flushes_an_active_gesture(monkeypatch):
+    """Real regression: short uploaded clips recognized nothing at all,
+    because the segmenter was still ACTIVE (never reached its natural
+    offset) when the session ended, and eviction just discarded it. If
+    force_flush() returns a window, /reset_session must classify it (via
+    the module-level _normalizer/_classifier, same as /process_frame) and
+    return it instead of silently dropping it."""
+    import numpy as np
+
+    fake_window = np.zeros((1, 1), dtype=np.float32)  # opaque -- only identity matters here
+    cv_main._session_segmenters["s1"] = _FakeSegmenter(flush_result=fake_window)
+    cv_main._session_locks["s1"] = asyncio.Lock()
+
+    seen_windows = []
+    monkeypatch.setattr(cv_main, "_normalizer", lambda w: (seen_windows.append(w), "normalized")[1])
+    monkeypatch.setattr(
+        cv_main, "_classifier",
+        type("FakeClassifier", (), {"predict_top3": staticmethod(
+            lambda norm_win: [{"gloss": "память", "prob": 0.3}]
+        )})(),
+    )
+
+    result = await cv_main.reset_session({"session_id": "s1"})
+
+    assert result == {"evicted": True, "glosses": [{"gloss": "память", "prob": 0.3}]}
+    assert seen_windows == [fake_window]
+
+
+@pytest.mark.asyncio
+async def test_reset_session_with_no_active_gesture_returns_no_glosses():
+    cv_main._session_segmenters["s1"] = _FakeSegmenter(flush_result=None)
+    cv_main._session_locks["s1"] = asyncio.Lock()
+
+    result = await cv_main.reset_session({"session_id": "s1"})
+
+    assert result == {"evicted": True, "glosses": []}
 
 
 @pytest.mark.asyncio
