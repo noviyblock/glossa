@@ -134,6 +134,10 @@ class _HomePageState extends State<HomePage> {
   // null if none of the glosses matched a reference clip (see
   // services/tts_service/video.py::SignVideoAssembler).
   String? _signVideoB64;
+  // Bumped on every "replay" press -- see _signVideoReplayPanel. The video
+  // itself doesn't change, so _signVideoB64 alone as a key wouldn't force
+  // _SignVideoPlayer to actually remount/restart; this does.
+  int _signVideoReplayNonce = 0;
   final _glossScrollCtrl = ScrollController();
 
   // ── Mic input (ASR) ──────────────────────────────────────────────────────── //
@@ -884,7 +888,7 @@ class _HomePageState extends State<HomePage> {
                 child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                   Expanded(child: _cameraPanel(cs)),
                   Divider(height: 1, color: cs.outlineVariant),
-                  Expanded(child: _skeletonPanel(cs)),
+                  Expanded(child: _visualOutputPanel(cs)),
                 ]),
               ),
               VerticalDivider(width: 1, color: cs.outlineVariant),
@@ -900,7 +904,7 @@ class _HomePageState extends State<HomePage> {
           : Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               SizedBox(height: 220, child: _cameraPanel(cs)),
               Divider(height: 1, color: cs.outlineVariant),
-              SizedBox(height: 180, child: _skeletonPanel(cs)),
+              SizedBox(height: 180, child: _visualOutputPanel(cs)),
               Divider(height: 1, color: cs.outlineVariant),
               SizedBox(height: 240, child: _recognitionChatPanel(cs)),
               Divider(height: 1, color: cs.outlineVariant),
@@ -1063,7 +1067,77 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // ── Panel 1b: Skeleton (own quadrant, not overlaid on the camera) ───────── //
+  // ── Panel 1b: Visual output (skeleton / reference clip / upload preview) ── //
+  //
+  // One panel, three mutually-exclusive modes depending on what's actually
+  // happening right now:
+  //  - Live camera signing -> skeleton (own quadrant, not overlaid on the
+  //    camera feed -- see _skeletonPanel).
+  //  - An uploaded video is being recognized -> no skeleton at all (the
+  //    video itself already plays in the top-left camera panel via the
+  //    same _CameraView/_video; recognized glosses go to the normal
+  //    "Распознанные жесты" chat exactly like live camera does) -- this
+  //    panel just shows a neutral "processing" placeholder instead of a
+  //    skeleton that used to flash for about a second and mean nothing.
+  //  - Neither camera nor upload is active, but the last text->RSL
+  //    translation produced a reference-clip video -> show that clip full
+  //    size instead of the cramped 180px strip it used to sit in inside
+  //    the gloss chat panel, with an explicit replay button.
+  bool get _isVideoFileSession => _videoObjectUrl != null;
+
+  Widget _visualOutputPanel(ColorScheme cs) {
+    if (_cameraActive && _isVideoFileSession) return _uploadPreviewPanel(cs);
+    if (_cameraActive) return _skeletonPanel(cs);
+    if (_signVideoB64 != null) return _signVideoReplayPanel(cs);
+    return _skeletonPanel(cs); // idle placeholder state (no camera, no clip yet)
+  }
+
+  Widget _uploadPreviewPanel(ColorScheme cs) => const ColoredBox(
+    color: Colors.black,
+    child: Center(
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        SizedBox(
+          width: 28, height: 28,
+          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
+        ),
+        SizedBox(height: 10),
+        Text('Распознаю жесты в видео…',
+            style: TextStyle(color: Colors.white70, fontSize: 12)),
+        SizedBox(height: 4),
+        Text('Видео — сверху, результат — в чате справа',
+            style: TextStyle(color: Colors.white38, fontSize: 11, fontStyle: FontStyle.italic)),
+      ]),
+    ),
+  );
+
+  Widget _signVideoReplayPanel(ColorScheme cs) => ColoredBox(
+    color: Colors.black,
+    child: Stack(
+      fit: StackFit.expand,
+      children: [
+        // Key includes the replay nonce -- the video itself doesn't change
+        // on replay, so without a changing key Flutter would keep the same
+        // element mounted instead of actually restarting playback.
+        _SignVideoPlayer(
+          key: ValueKey('$_signVideoB64-$_signVideoReplayNonce'),
+          base64Mp4: _signVideoB64!,
+        ),
+        const Positioned(
+          top: 6, left: 8,
+          child: Text('Жесты собеседнику', style: TextStyle(color: Colors.white54, fontSize: 11)),
+        ),
+        Positioned(
+          bottom: 8, right: 8,
+          child: FloatingActionButton.small(
+            heroTag: 'replaySignVideo',
+            tooltip: 'Проиграть заново',
+            onPressed: () => setState(() => _signVideoReplayNonce++),
+            child: const Icon(Icons.replay),
+          ),
+        ),
+      ],
+    ),
+  );
 
   Widget _skeletonPanel(ColorScheme cs) {
     final scrubbable = _reviewingGesture && _recognizedGestureFrames.length > 1;
@@ -1140,13 +1214,10 @@ class _HomePageState extends State<HomePage> {
     children: [
       _PanelHeader(icon: Icons.sign_language, label: 'Глоссы от собеседника',
           color: cs.secondary, bg: cs.secondaryContainer.withValues(alpha: 0.5)),
-      if (_signVideoB64 != null)
-        Container(
-          key: ValueKey(_signVideoB64),
-          height: 180,
-          color: Colors.black,
-          child: _SignVideoPlayer(base64Mp4: _signVideoB64!),
-        ),
+      // Video itself now lives in the full-size visual-output panel
+      // (bottom-left, see _visualOutputPanel/_signVideoReplayPanel) --
+      // squeezed into a 180px strip here made it look tiny for no reason,
+      // since that panel already has a whole quadrant of room to work with.
       Expanded(
         child: _glossMsgs.isEmpty
             ? _EmptyState(icon: Icons.chat_bubble_outline,
@@ -1501,7 +1572,7 @@ class _CameraView extends StatelessWidget {
 
 class _SignVideoPlayer extends StatelessWidget {
   final String base64Mp4;
-  const _SignVideoPlayer({required this.base64Mp4});
+  const _SignVideoPlayer({super.key, required this.base64Mp4});
 
   @override
   Widget build(BuildContext context) {
