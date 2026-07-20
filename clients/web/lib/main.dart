@@ -17,6 +17,12 @@ class GlossaWebApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.deepPurple,
+        // Explicit, not left to the Material default -- without this,
+        // CanvasKit falls back to fetching Roboto from fonts.gstatic.com at
+        // runtime instead of using the bundled font declared in
+        // pubspec.yaml (assets/fonts/), and on a network that can't reach
+        // it every bit of text in the app silently renders blank.
+        fontFamily: 'Roboto',
       ),
       home: const HomePage(),
     );

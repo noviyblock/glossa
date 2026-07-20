@@ -1,5 +1,5 @@
 outs:
-- md5: 91b81e9e31152cce957b1bc0fb5cf3a9
-  size: 10192159
+- md5: 982b6f7e381609110283e4ec62a5750d
+  size: 9370163
   hash: md5
   path: stgcn_final.pt

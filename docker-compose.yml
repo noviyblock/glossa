@@ -104,29 +104,68 @@ services:
       # Inference backends
       ONNX_MOBILE_PATH: /models/gesture_classifier_mobile.onnx
       OV_XML_PATH: /models/stgcn_topk_int8/stgcn_topk_int8.xml
-      # Keypoint extraction (DWPose: YOLOX detector + RTMPose body+hand)
-      DWPOSE_DET_PATH: /models/dwpose/yolox_l.onnx
-      DWPOSE_POSE_PATH: /models/dwpose/dw-ll_ucoco_384.onnx
-      DWPOSE_DET_CONF: "0.5"
-      DWPOSE_DET_NMS: "0.45"
+      # Keypoint extraction — rtmlib (RTMDet-nano + RTMW)
+      RTMLIB_MODE: lightweight
+      RTMLIB_DEVICE: cpu
+      TORCH_HOME: /home/glossa/.rtmlib
+      LOW_CONF_ZERO_THRESHOLD: "0.3"
+      HAND_LOW_CONF_ZERO_THRESHOLD: "0.15"
+      DET_INTERVAL: "5"
+      TRACK_CROP_PADDING: "1.8"
+      # ${VAR:-default} (not a literal, unlike the vars above) so a
+      # calibration run can override it from the shell without editing this
+      # file: `DIAG_LOG_INTERVAL=1 docker compose up -d cv-service` — set to
+      # 1-3 while collecting last_activity samples for GESTURE_* threshold
+      # calibration (see SEGMENTER_CALIBRATION.md), leave unset otherwise.
+      DIAG_LOG_INTERVAL: "${DIAG_LOG_INTERVAL:-30}"
+      SMOOTHING_ENABLED: "true"
+      SMOOTH_MINCUTOFF: "1.0"
+      SMOOTH_BETA: "0.3"
+      SMOOTH_DCUTOFF: "1.0"
       # Normalisation
       NORM_STATS_PATH: /models/norm_stats.npz
       CLASS_MAP_PATH: /data/idx_to_class.json
-      # Sliding window
-      WINDOW_SIZE: "32"
-      WINDOW_STRIDE: "15"
+      NUM_CLASSES: "200"
+      # Sliding window — model input is 64 frames (ST-GCN trained on T=64,
+      # see scripts/patch_colab_03_scenario.py). WINDOW_STRIDE/EARLY_EMIT/
+      # CONF_THRESHOLD are now only consumed by the unused legacy /ws
+      # streaming endpoint (see main.py) — /process_frame (the live path)
+      # uses GESTURE_* config below instead. Left in place as harmless dead
+      # config rather than churning this file for an unrelated cleanup.
+      WINDOW_SIZE: "64"
+      WINDOW_STRIDE: "5"
+      EARLY_EMIT: "10"
       CONF_THRESHOLD: "0.7"
+      # Gesture segmentation (automatic onset/offset from hand motion,
+      # replaces the manual hold-to-sign button) — tune empirically against
+      # the live camera/users, see gesture_segmenter.py docstring.
+      GESTURE_ONSET_THRESHOLD: "0.06"
+      GESTURE_OFFSET_THRESHOLD: "0.03"
+      GESTURE_ONSET_FRAMES: "3"
+      GESTURE_OFFSET_FRAMES: "6"
+      GESTURE_HAND_PRESENCE_CONF: "0.15"
+      GESTURE_PREROLL_FRAMES: "5"
+      GESTURE_MIN_FRAMES: "8"
+      GESTURE_MAX_FRAMES: "150"
+      # Per-session state cleanup — TTL matches api-gateway's
+      # GATEWAY_SESSION_TTL below, so cv-service doesn't hold state longer
+      # than the gateway still remembers the session.
+      SESSION_CLEANUP_INTERVAL: "60"
+      SESSION_IDLE_TTL: "300"
       # Runtime
       CV_SERVICE_PORT: "8001"
       REDIS_URL: redis://redis:6379
-    volumes: *model-vols
+    volumes:
+      - ./models:/models:ro
+      - ./data:/data:ro
+      - ./rtmlib_cache:/home/glossa/.rtmlib
     depends_on:
       redis:
         condition: service_healthy
     healthcheck:
       <<: *hc
       test: ["CMD", "curl", "-f", "http://localhost:8001/health/live"]
-      start_period: 60s
+      start_period: 90s
     ports:
       - "8001:8001"
 
@@ -138,13 +177,12 @@ services:
     <<: *svc
     environment:
       ASR_SERVICE_PORT: "8002"
-      WHISPER_MODEL: base
-      DEVICE: cpu
-      COMPUTE_TYPE: int8
+      ASR_WHISPER_MODEL: base
+      ASR_DEVICE: cpu
+      ASR_COMPUTE_TYPE: int8
       LANGUAGE: ru
-      BEAM_SIZE: "5"
-      VAD_FILTER: "true"
-      # cache dir inside the models volume
+      ASR_BEAM_SIZE: "5"
+      ASR_VAD_FILTER: "true"
       WHISPER_CACHE_DIR: /models/whisper_cache
     volumes:
       - ./models:/models:ro
@@ -167,6 +205,7 @@ services:
     <<: *svc
     environment:
       NLP_SERVICE_PORT: "8003"
+      NLP_DEVICE: cpu
       MODEL_PATH: /models/qwen2_merged_qwen2_1.5b
       CACHE_SIZE: "500"
       MAX_NEW_TOKENS: "128"
@@ -190,13 +229,15 @@ services:
     <<: *svc
     environment:
       TTS_SERVICE_PORT: "8004"
-      SILERO_REPO: snakers4/silero-models
-      DEFAULT_SPEAKER: xenia
-      SAMPLE_RATE: "24000"
-      CACHE_SIZE: "200"
+      TTS_DEVICE: cpu
+      TTS_SILERO_REPO: snakers4/silero-models
+      TTS_DEFAULT_SPEAKER: xenia
+      TTS_SAMPLE_RATE: "24000"
+      TTS_CACHE_SIZE: "200"
       TORCH_HOME: /torch_cache
     volumes:
       - ./models:/models:ro
+      - ./data:/data:ro
       - torch-cache:/torch_cache
     depends_on:
       redis:
@@ -223,6 +264,11 @@ services:
       TTS_SERVICE_URL: http://tts-service:8004
       GATEWAY_SESSION_TTL: "300"
       GATEWAY_HTTP_TIMEOUT: "120"
+      # Sentence accumulation — buffer completed gestures and translate the
+      # whole sentence at once (T9-style disambiguation across positions)
+      # instead of calling the LLM after every single gesture.
+      SENTENCE_PAUSE_SECONDS: "2.5"
+      MAX_SENTENCE_GLOSSES: "8"
     depends_on:
       redis:
         condition: service_healthy

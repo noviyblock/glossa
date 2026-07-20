@@ -10,16 +10,18 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi[standard]>=0.111",
     "uvicorn[standard]>=0.29",
-    "onnxruntime>=1.18",
+    # onnxruntime (CPU) vs onnxruntime-gpu is installed explicitly per build
+    # stage in the Dockerfile, matching nlp_service's torch/torch-cu121
+    # split — the two PyPI packages both provide the `onnxruntime` import
+    # name and cannot coexist, so it can't be listed here.
+    "openvino>=2024.1",
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
+    "rtmlib",
     "redis[hiredis]>=5.0",
     "orjson>=3.10",
+    "prometheus-client>=0.20",
 ]
-
-[project.optional-dependencies]
-openvino = ["openvino>=2024.1"]
-gpu = ["onnxruntime-gpu>=1.18"]
 
 [tool.hatch.build.targets.wheel]
 bypass-selection = true

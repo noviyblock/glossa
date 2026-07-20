@@ -1,19 +1,136 @@
 import os
 
-WINDOW_SIZE      = int(os.getenv("WINDOW_SIZE", "32"))
+WINDOW_SIZE      = int(os.getenv("WINDOW_SIZE", "64"))
 NUM_JOINTS       = int(os.getenv("NUM_JOINTS", "75"))
 IN_CHANNELS      = int(os.getenv("IN_CHANNELS", "3"))
-NUM_CLASSES      = int(os.getenv("NUM_CLASSES", "1000"))
-WINDOW_STRIDE    = int(os.getenv("WINDOW_STRIDE", "15"))
+NUM_CLASSES      = int(os.getenv("NUM_CLASSES", "200"))
+WINDOW_STRIDE    = int(os.getenv("WINDOW_STRIDE", "5"))
+EARLY_EMIT       = int(os.getenv("EARLY_EMIT", "10"))
 CONF_THRESHOLD   = float(os.getenv("CONF_THRESHOLD", "0.7"))
 ONNX_MOBILE_PATH = os.getenv("ONNX_MOBILE_PATH", "/models/gesture_classifier_mobile.onnx")
 OV_XML_PATH      = os.getenv("OV_XML_PATH", "/models/stgcn_topk_int8/stgcn_topk_int8.xml")
 NORM_STATS_PATH  = os.getenv("NORM_STATS_PATH", "/models/norm_stats.npz")
-DWPOSE_DET_PATH  = os.getenv("DWPOSE_DET_PATH", "/models/dwpose/yolox_l.onnx")
-DWPOSE_POSE_PATH = os.getenv("DWPOSE_POSE_PATH", "/models/dwpose/dw-ll_ucoco_384.onnx")
-DWPOSE_DET_CONF  = float(os.getenv("DWPOSE_DET_CONF", "0.5"))
-DWPOSE_DET_NMS   = float(os.getenv("DWPOSE_DET_NMS", "0.45"))
+# rtmlib Wholebody mode — 'lightweight' (current default, yolox_tiny +
+# rtmw-dw-l-m), 'balanced' (yolox_m + rtmw-dw-x-l, genuinely bigger models),
+# 'performance' (heaviest, not benchmarked, likely too slow for real-time
+# on CPU).
+#
+# Benchmarked 2026-07-18 on glossa-vm-demo (CPU), scripts/measure_accuracy.py
+# against all 200 models/gloss_clips (185 evaluated, 15 skipped as too
+# short), see RTMLIB_MODE_BENCHMARK.md:
+#   lightweight: top-1 0.9514 (95% CI 0.920-0.982), extraction 40.75ms/frame
+#   balanced:    top-1 0.9459 (95% CI 0.913-0.979), extraction 132.75ms/frame
+# CIs overlap heavily -- the accuracy difference is noise at this sample
+# size (n=185). The 3.26x extraction-latency cost is NOT noise (averaged
+# over 7321 frames, and expected: balanced's detector/pose backbones are
+# both architecturally larger). Verdict: 'balanced' is not worth it on CPU
+# — pays a large, certain latency cost for an accuracy change that isn't
+# even distinguishable from the current default. Re-evaluate only if the
+# GPU path (services/cv_service/Dockerfile's production-gpu target) gets
+# wired into the live deployment, since that would shrink the latency
+# cost this verdict is based on (does not change the accuracy finding).
+RTMLIB_MODE   = os.getenv("RTMLIB_MODE",   "lightweight")
+RTMLIB_DEVICE = os.getenv("RTMLIB_DEVICE", "cpu")
 CLASS_MAP_PATH   = os.getenv("CLASS_MAP_PATH", "/data/idx_to_class.json")
+
+# Bbox tracking (keypoint_extractor.py) — run rtmlib on the full frame every
+# DET_INTERVAL calls to (re)acquire the person, and on a padded crop around
+# the last known keypoint bbox in between (cheaper: both detector and pose
+# model cost scale with input resolution). TRACK_CROP_PADDING multiplies the
+# last bbox's width/height before cropping, to give a moving person room to
+# stay inside the crop until the next full-frame redetect.
+DET_INTERVAL       = int(os.getenv("DET_INTERVAL", "5"))
+TRACK_CROP_PADDING = float(os.getenv("TRACK_CROP_PADDING", "1.8"))
+
+# Cadence (in frames) of the periodic DIAG log in main.py. Default 30 is
+# fine for steady-state dropout monitoring, but segments produced by
+# GestureSegmenter are frequently SHORTER than 30 frames (observed range:
+# 19-150+) — at the default cadence most segments get at most one
+# last_activity sample, which isn't enough resolution to derive
+# GESTURE_ONSET/OFFSET_THRESHOLD from the last_activity distribution.
+# Set to 1-3 for a calibration run, back to 30 (or unset) afterwards —
+# this only changes log volume, no classification behavior.
+DIAG_LOG_INTERVAL = int(os.getenv("DIAG_LOG_INTERVAL", "30"))
+
+# Joints with confidence below this are hard-zeroed (x=y=score=0) to match
+# DWPose's implicit "not detected = absent" semantics — see
+# keypoint_extractor.py::_zero_low_confidence_joints. Matches the client's
+# existing _SkeletonPainter._minScore rendering cutoff.
+LOW_CONF_ZERO_THRESHOLD = float(os.getenv("LOW_CONF_ZERO_THRESHOLD", "0.3"))
+
+# Hands get their OWN, lower threshold. Live production logs showed
+# nonzero_kp dropping to ~15/75 mid-gesture — i.e. most of both hands zeroed
+# out during actual signing motion. RTMW is a single-shot per-frame model
+# with no temporal prior, so fast hand motion (motion blur) legitimately
+# lowers its confidence even when the hand IS genuinely there and roughly
+# correctly localized — unlike DWPose's separate hand detector, whose
+# "undetected" case is closer to true absence. 0.3 was tuned for "is this
+# joint absent", not "is this moving hand slightly less certain" — hands
+# are the entire signal for RSL, so we tolerate more per-frame noise on them
+# rather than lose them outright. Needs empirical tuning against real
+# camera footage (see scripts/analyze_cv_logs.py for the nonzero_kp/region
+# breakdown to calibrate this against).
+HAND_LOW_CONF_ZERO_THRESHOLD = float(os.getenv("HAND_LOW_CONF_ZERO_THRESHOLD", "0.15"))
+
+# One Euro Filter (keypoint_smoother.py) — adaptive temporal smoothing applied
+# before keypoints reach the classifier. mincutoff: baseline smoothing at
+# near-zero speed (lower = smoother when still). beta: how much fast motion
+# cuts through unsmoothed (higher = less lag on real gestures, more jitter
+# passthrough). Coordinates are normalised [0,1], not pixels — tuned an
+# order of magnitude below typical mouse-cursor presets. Best-effort
+# defaults, tune empirically.
+SMOOTHING_ENABLED = os.getenv("SMOOTHING_ENABLED", "true").lower() == "true"
+SMOOTH_MINCUTOFF  = float(os.getenv("SMOOTH_MINCUTOFF", "1.0"))
+SMOOTH_BETA       = float(os.getenv("SMOOTH_BETA", "0.3"))
+SMOOTH_DCUTOFF    = float(os.getenv("SMOOTH_DCUTOFF", "1.0"))
+
+# Gesture segmentation (auto onset/offset from hand motion, replaces manual
+# hold-to-sign button) — thresholds are best-effort defaults, tune empirically
+# against the live camera using the periodic DIAG log's last_activity value.
+GESTURE_ONSET_THRESHOLD    = float(os.getenv("GESTURE_ONSET_THRESHOLD", "0.06"))
+GESTURE_OFFSET_THRESHOLD   = float(os.getenv("GESTURE_OFFSET_THRESHOLD", "0.03"))
+GESTURE_ONSET_FRAMES       = int(os.getenv("GESTURE_ONSET_FRAMES", "3"))
+# Stillness (in processed frames) required after a gesture before the FINAL
+# classification fires — a straight latency/accuracy tradeoff: lower fires
+# sooner but risks cutting off a gesture that has a brief internal pause;
+# higher is safer but adds tail latency. Lowered from 8→6 (was ~0.7-1.3s of
+# stillness, now ~0.5-1.0s at realistic frame cadence) now that
+# GestureSegmenter also emits an early PREVIEW classification once the
+# segment crosses GESTURE_MIN_FRAMES (see gesture_segmenter.py), which
+# already gives the user fast feedback independent of this value — so this
+# knob now only affects how soon the FINAL (corrected) result lands, not the
+# perceived responsiveness.
+GESTURE_OFFSET_FRAMES      = int(os.getenv("GESTURE_OFFSET_FRAMES", "6"))
+# Matches HAND_LOW_CONF_ZERO_THRESHOLD, not the old body threshold — this
+# checks mean confidence of the SAME (now less aggressively zeroed) hand
+# keypoints; leaving this at the old 0.3 would make the segmenter think
+# "no hands" even on frames the extractor now keeps as valid low-confidence
+# hand data, causing spurious offset-triggering mid-gesture.
+GESTURE_HAND_PRESENCE_CONF = float(os.getenv("GESTURE_HAND_PRESENCE_CONF", "0.15"))
+GESTURE_PREROLL_FRAMES     = int(os.getenv("GESTURE_PREROLL_FRAMES", "5"))
+GESTURE_MIN_FRAMES         = int(os.getenv("GESTURE_MIN_FRAMES", "8"))
+GESTURE_MAX_FRAMES         = int(os.getenv("GESTURE_MAX_FRAMES", "150"))
+
+# Test-time augmentation (gesture_classifier.py::predict_top3_tta) — averages
+# softmax over the window plus jittered copies using the SAME sigma=0.02
+# spatial_jitter the model was trained with (colab_glossa_01a). Applied only
+# to FINAL classifications (not previews, to keep those fast) — see main.py.
+# n=3 costs ~2 extra OpenVINO INT8 passes (~7-10ms each per prior benchmark,
+# negligible next to the ~90ms/frame extraction cost).
+TTA_ENABLED      = os.getenv("TTA_ENABLED", "true").lower() == "true"
+TTA_VARIANTS     = int(os.getenv("TTA_VARIANTS", "3"))
+TTA_JITTER_SIGMA = float(os.getenv("TTA_JITTER_SIGMA", "0.02"))
+
 REDIS_URL        = os.getenv("REDIS_URL", "redis://redis:6379")
 CV_STREAM_OUT    = os.getenv("CV_STREAM_OUT", "cv:results")
 SERVICE_PORT     = int(os.getenv("CV_SERVICE_PORT", "8001"))
+
+# Per-session state (_session_segmenters/_session_smoothers/_session_tracks/
+# _session_locks/_diag_counters in main.py) grows unboundedly otherwise —
+# background sweep in main.py evicts sessions idle longer than
+# SESSION_IDLE_TTL, checked every SESSION_CLEANUP_INTERVAL. TTL matches
+# api_gateway's GATEWAY_SESSION_TTL (services/api_gateway/config.py, default
+# 300s) — no point holding cv_service state longer than the gateway still
+# remembers the session.
+SESSION_CLEANUP_INTERVAL = int(os.getenv("SESSION_CLEANUP_INTERVAL", "60"))
+SESSION_IDLE_TTL         = int(os.getenv("SESSION_IDLE_TTL", "300"))

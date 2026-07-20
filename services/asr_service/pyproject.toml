@@ -13,6 +13,7 @@ dependencies = [
     "faster-whisper>=1.0",
     "numpy>=1.26",
     "orjson>=3.10",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]

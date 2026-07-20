@@ -37,15 +37,49 @@ except ImportError:
 #   33-53  left hand  (21 pts)
 #   54-74  right hand (21 pts)
 
+# ⚠️ KNOWN LIMITATION (see docs/KNOWN_LIMITATIONS.md, "ST-GCN graph topology
+# mismatch") — the tuples below are written as if indices 0-16 were TRUE
+# COCO-17 order (5/6=shoulders, 7/8=elbows, 9/10=wrists, ...). They are NOT:
+# indices 0-16 here are TRAINING order, produced by _COCO17_TO_TRAINING_ORDER
+# in services/cv_service/keypoint_extractor.py:24-29,45. Training-order index
+# → body part:
+#   0=nose   1=Rsho  2=Relb  3=Rwri  4=Lsho  5=Lelb  6=Lwri
+#   7=Rhip   8=Rkne  9=Rank  10=Lhip 11=Lkne 12=Lank
+#   13=Reye  14=Leye 15=Rear 16=Lear
+# What each edge that survives build_adjacency()'s `i < 17 and j < 17` filter
+# ACTUALLY connects once resolved through that table (previous comments here
+# read them as true-COCO "shoulders → elbows → wrists" etc., which was wrong
+# on all of them):
+#   (0,1)  nose–Rsho              (0,2)  nose–Relb
+#   (1,3)  Rsho–Rwri   [same arm, skips elbow]
+#   (2,4)  Relb–Lsho   [crosses body]
+#   (5,6)  Lelb–Lwri   [forearm — anatomically fine, by coincidence]
+#   (5,7)  Lelb–Rhip   [crosses body]      (6,8)  Lwri–Rkne  [crosses body]
+#   (7,9)  Rhip–Rank   [same leg, skips knee]
+#   (5,11) Lelb–Lkne   [crosses body]      (6,12) Lwri–Lank  [crosses body]
+#   (11,12) Lkne–Lank  [lower leg — fine, by coincidence]
+#   (11,13) Lkne–Reye  [unrelated regions] (13,15) Reye–Rear [face — fine]
+#   (12,14) Lank–Leye  [unrelated regions] (14,16) Leye–Lear [face — fine]
+#   (0,5)  nose–Lelb   (0,6)  nose–Lwri    (8,10) Rkne–Lhip  [crosses body]
+# Roughly a third of the surviving edges (forearm/lower-leg/face pairs) still
+# connect anatomically adjacent joints purely by coincidence of the
+# permutation; the rest connect unrelated body regions. This is a structural
+# prior baked into GraphConv's weights via training, not an inference bug —
+# NOT changed here. Fixing it means retraining from scratch on a corrected
+# graph (existing weights are tied to this exact, if mislabeled, topology).
+# (Edges with an index ≥17 below are silently dropped by the `i < 17 and
+# j < 17` guard in build_adjacency() — feet are handled by _FEET_EDGES
+# instead — left as dead entries rather than pruned, to avoid touching
+# functional code in a documentation-only pass.)
 _COCO_EDGES = [
-    (0, 1), (0, 2), (1, 3), (2, 4),           # nose → eyes/ears
-    (5, 6), (5, 7), (6, 8), (7, 9),           # shoulders → elbows → wrists
-    (5, 11), (6, 12), (11, 12),               # shoulders → hips
-    (11, 13), (13, 15), (15, 17), (17, 19),   # left leg
-    (12, 14), (14, 16), (16, 18), (18, 20),   # right leg
-    (0, 5), (0, 6),                           # nose → shoulders
-    (5, 7), (7, 9),                           # left arm
-    (6, 8), (8, 10),                          # right arm
+    (0, 1), (0, 2), (1, 3), (2, 4),
+    (5, 6), (5, 7), (6, 8), (7, 9),
+    (5, 11), (6, 12), (11, 12),
+    (11, 13), (13, 15), (15, 17), (17, 19),
+    (12, 14), (14, 16), (16, 18), (18, 20),
+    (0, 5), (0, 6),
+    (5, 7), (7, 9),
+    (6, 8), (8, 10),
 ]
 
 _FEET_EDGES = [

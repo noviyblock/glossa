@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 import io
 import logging
+import subprocess
 import wave
 
 from faster_whisper import WhisperModel
@@ -60,7 +61,11 @@ class Transcriber:
 
     @staticmethod
     def _decode_audio(data: bytes) -> np.ndarray:
-        """Return float32 mono 16 kHz array from WAV bytes or raw PCM int16."""
+        """Return float32 mono 16 kHz array from WAV bytes, or anything
+        ffmpeg can read (webm/opus, ogg, mp3, ...) -- a browser's
+        MediaRecorder never produces WAV (no browser has a native WAV
+        encoder), it's webm/opus by default, so that's the actual input
+        shape for real microphone recordings, not an edge case."""
         try:
             with wave.open(io.BytesIO(data)) as wf:
                 n_channels = wf.getnchannels()
@@ -93,6 +98,30 @@ class Transcriber:
             return samples.astype(np.float32)
 
         except wave.Error:
-            # Treat as raw int16 PCM at 16 kHz
+            pcm = Transcriber._decode_via_ffmpeg(data)
+            if pcm is not None:
+                return pcm
+            # Last-resort fallback (kept for any genuinely-raw-PCM caller,
+            # not a real path for browser microphone input): treat as raw
+            # int16 PCM at 16 kHz. Silently wrong for a compressed format
+            # ffmpeg also couldn't handle, but there's no third option.
             samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
             return samples
+
+    @staticmethod
+    def _decode_via_ffmpeg(data: bytes) -> np.ndarray | None:
+        """ffmpeg -i <stdin> -ar 16000 -ac 1 -f s16le <stdout> -- container/
+        codec auto-detected from the byte stream itself (webm/opus, ogg,
+        mp3, m4a, ...), no extension/mimetype needed. Returns None (not a
+        raised exception) on failure so the caller can fall back, since
+        "unrecognized audio" is an expected possibility, not a bug."""
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                 "-i", "pipe:0", "-ar", str(_SAMPLE_RATE), "-ac", "1", "-f", "s16le", "pipe:1"],
+                input=data, capture_output=True, timeout=30, check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            logger.warning("ffmpeg audio decode failed (%s), falling back to raw-PCM interpretation", exc)
+            return None
+        return np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0

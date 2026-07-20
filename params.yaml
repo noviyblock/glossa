@@ -18,7 +18,8 @@ data:
 # ── Gesture recognition ───────────────────────────────────────────────────────
 gesture:
   model_architecture: stgcn
-  num_classes:    1000
+  num_classes:    200      # reduced from 1000 — see data/selected_classes_200.json
+  class_filter_path: data/selected_classes_200.json
   num_joints:     75
   window_size:    32       # sliding window for inference (frames)
   sequence_length: 64      # training sequence length (EDA: median=48, Q3=58)

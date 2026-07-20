@@ -21,6 +21,14 @@ class WsEndSession(BaseModel):
     type: Literal["end_session"]
     session_id: str
 
+class WsFlushSentence(BaseModel):
+    type: Literal["flush_sentence"]
+    session_id: str
+
+class WsDeleteLastGesture(BaseModel):
+    type: Literal["delete_last_gesture"]
+    session_id: str
+
 
 # ── Outgoing WebSocket messages (gateway → client) ────────────────────────── #
 
@@ -44,6 +52,24 @@ class WsAudio(BaseModel):
     session_id: str
     payload: dict[str, Any]             # {"wav": base64}
 
+class WsVideo(BaseModel):
+    type: Literal["video"] = "video"
+    session_id: str
+    payload: dict[str, Any]             # {"video": base64 | None}
+
+class WsPendingSentence(BaseModel):
+    type: Literal["pending_sentence"] = "pending_sentence"
+    session_id: str
+    payload: dict[str, Any]             # {"positions": [[{"gloss","prob"},...],...]}
+
+class WsPeerMessage(BaseModel):
+    """Relayed to the *other* participant in a two-party call (see
+    call_manager.py) — same shape regardless of which direction produced
+    it: {"text": str, "audio": base64|None, "video": base64|None}."""
+    type: Literal["peer_message"] = "peer_message"
+    session_id: str
+    payload: dict[str, Any]
+
 class WsError(BaseModel):
     type: Literal["error"] = "error"
     session_id: str
@@ -64,5 +90,35 @@ class TranslateResponse(BaseModel):
     translation: str
     glosses: list[dict] | None = None
     audio_wav: str | None = None        # base64 WAV (text_to_rsl only)
+    video_mp4: str | None = None        # base64 MP4, sign clips (text_to_rsl only)
+    skeleton_sequences: list[dict] | None = None  # [{"gloss","frames"}, ...] (text_to_rsl only)
     latency_ms: float
     cached: bool = False
+
+
+# ── REST /api/v1/asr — mic-input transcription only ─────────────────────────  #
+
+class AsrRequest(BaseModel):
+    audio: str          # base64 audio (any container ffmpeg can decode)
+    session_id: str = Field(default="")
+
+class AsrResponse(BaseModel):
+    text: str
+    latency_ms: float
+
+
+# ── Two-party call (see call_manager.py) ────────────────────────────────────  #
+
+class CallCreateRequest(BaseModel):
+    session_id: str = Field(default="")
+
+class CallCreateResponse(BaseModel):
+    call_id: str
+    session_id: str
+
+class CallJoinRequest(BaseModel):
+    session_id: str = Field(default="")
+
+class CallJoinResponse(BaseModel):
+    call_id: str
+    session_id: str

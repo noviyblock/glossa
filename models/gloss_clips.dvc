@@ -1,0 +1,6 @@
+outs:
+- md5: 5f18857296d67ffde685dbdfbcf9da7f.dir
+  size: 22349408
+  nfiles: 200
+  hash: md5
+  path: gloss_clips

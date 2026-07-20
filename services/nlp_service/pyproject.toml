@@ -13,6 +13,11 @@ dependencies = [
     "transformers>=4.41",
     "accelerate>=0.30",
     "orjson>=3.10",
+    # The merged checkpoint (colab_03 merge_and_unload) still embeds a bitsandbytes
+    # 4-bit quantization_config in its config.json — transformers requires bitsandbytes
+    # to be importable to load it, even though the weights were meant to be merged/dequantized.
+    "bitsandbytes>=0.46.1",
+    "prometheus-client>=0.20",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
@@ -73,25 +74,15 @@ class _TextToRslScreenState extends State<TextToRslScreen> {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
 
-    final ws = context.read<WebSocketService>();
     setState(() {
       _isProcessing  = true;
       _statusText    = 'Перевод…';
       _glossSequence = '';
     });
 
-    try {
-      if (ws.status != WsStatus.connected) {
-        await ws.connect(Config.wsTextToRsl);
-      }
-      // Encode text as fake "audio" — server handles REST fallback
-      // For text input, we call the REST endpoint instead via HTTP
-      await _translateTextViaRest(text);
-    } catch (e) {
-      if (mounted) setState(() => _statusText = 'Ошибка: $e');
-    } finally {
-      if (mounted) setState(() => _isProcessing = false);
-    }
+    await _translateTextViaRest(text);
+
+    if (mounted) setState(() => _isProcessing = false);
   }
 
   Future<void> _translateTextViaRest(String text) async {
@@ -276,7 +267,7 @@ class _TextToRslScreenState extends State<TextToRslScreen> {
                     boxShadow: _isRecording
                         ? [
                             BoxShadow(
-                                color: cs.error.withOpacity(0.4),
+                                color: cs.error.withValues(alpha: 0.4),
                                 blurRadius: 20,
                                 spreadRadius: 4)
                           ]

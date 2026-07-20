@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import time
@@ -10,12 +11,15 @@ from typing import Any
 
 import numpy as np
 import redis.asyncio as aioredis
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 import config as cfg
 from gesture_classifier import GestureClassifier
-from keypoint_extractor import KeypointExtractor
+from gesture_segmenter import GestureSegmenter
+from keypoint_extractor import KeypointExtractor, TrackState
+from keypoint_smoother import KeypointSmoother
 from normalizer import Normalizer
 from sliding_window import SlidingWindowBuffer
 
@@ -28,12 +32,78 @@ _normalizer: Normalizer         | None = None
 _classifier: GestureClassifier  | None = None
 _redis:      aioredis.Redis     | None = None
 _ready = False
+_session_segmenters: dict[str, GestureSegmenter] = {}
+_session_smoothers: dict[str, KeypointSmoother] = {}
+_session_tracks: dict[str, TrackState] = {}
+_session_locks: dict[str, asyncio.Lock] = {}
+_diag_counters: dict[str, int] = {}
+# monotonic timestamp of the last /process_frame call per session — the
+# sweep in _cleanup_idle_sessions() below is the only reader/writer besides
+# process_frame itself.
+_session_last_access: dict[str, float] = {}
+_cleanup_task: asyncio.Task | None = None
+
+
+def _evict_session(sid: str) -> bool:
+    """Drop all per-session state for `sid` (GestureSegmenter/
+    KeypointSmoother/TrackState/lock/diag counter). Returns False (does
+    NOT evict) if the session's lock is currently held -- deleting a
+    session out from under an in-flight /process_frame would hand that
+    request a lock object no longer reachable by anyone else, not a clean
+    reset. Shared by the idle-TTL sweep and /reset_session so both use
+    the exact same "is it safe to evict right now" rule.
+    """
+    lock = _session_locks.get(sid)
+    if lock is not None and lock.locked():
+        return False
+    _session_segmenters.pop(sid, None)
+    _session_smoothers.pop(sid, None)
+    _session_tracks.pop(sid, None)
+    _session_locks.pop(sid, None)
+    _diag_counters.pop(sid, None)
+    _session_last_access.pop(sid, None)
+    return True
+
+
+async def _cleanup_idle_sessions() -> None:
+    """Background sweep: evict per-session state for sessions idle longer
+    than SESSION_IDLE_TTL. Without this, these dicts grow for as long as the
+    process runs — every session_id that ever connected stays resident.
+    """
+    while True:
+        await asyncio.sleep(cfg.SESSION_CLEANUP_INTERVAL)
+        now = time.monotonic()
+        stale = [
+            sid for sid, last_seen in list(_session_last_access.items())
+            if now - last_seen > cfg.SESSION_IDLE_TTL
+        ]
+        if not stale:
+            continue
+        evicted = sum(1 for sid in stale if _evict_session(sid))
+        if evicted:
+            logger.info("Session cleanup: evicted %d idle session(s) (TTL=%ds)",
+                        evicted, cfg.SESSION_IDLE_TTL)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _extractor, _normalizer, _classifier, _redis, _ready
+    global _extractor, _normalizer, _classifier, _redis, _ready, _cleanup_task
     logger.info("Loading models…")
+    # onnxruntime silently falling back to CPU when RTMLIB_DEVICE=cuda was
+    # requested is a documented past failure mode (see Dockerfile's deps-gpu
+    # stage comments: CUDAExecutionProvider missing entirely from the
+    # available-providers list, not just failing to initialize) -- log the
+    # actual provider list at startup so that regression is visible instead
+    # of silently degrading to CPU-speed inference under a "cuda" label.
+    import onnxruntime as _ort
+    _providers = _ort.get_available_providers()
+    logger.info("onnxruntime available providers: %s", _providers)
+    if cfg.RTMLIB_DEVICE == "cuda" and "CUDAExecutionProvider" not in _providers:
+        logger.warning(
+            "RTMLIB_DEVICE=cuda requested but CUDAExecutionProvider is NOT in "
+            "onnxruntime's available providers -- extraction will silently run "
+            "on CPU. Check nvidia-container-toolkit / --gpus / GPU build target."
+        )
     _extractor  = KeypointExtractor()
     _normalizer = Normalizer(cfg.NORM_STATS_PATH)
     _classifier = GestureClassifier(
@@ -43,8 +113,13 @@ async def lifespan(app: FastAPI):
     )
     _redis = aioredis.from_url(cfg.REDIS_URL, decode_responses=True)
     _ready = True
+    _cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
     logger.info("CV service ready")
     yield
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _cleanup_task
     if _extractor:
         _extractor.close()
     if _redis:
@@ -52,6 +127,36 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="cv-service", version="0.1.0", lifespan=lifespan)
+
+# ── Prometheus metrics ───────────────────────────────────────────────────── #
+
+_SERVICE_NAME = "cv-service"
+
+REQUEST_COUNT = Counter(
+    "glossa_requests_total", "Total number of requests processed",
+    ["service", "endpoint", "status_code"],
+)
+REQUEST_LATENCY = Histogram(
+    "glossa_request_latency_seconds", "Request latency in seconds",
+    ["service", "endpoint"],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+)
+
+
+@app.middleware("http")
+async def _prometheus_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    REQUEST_COUNT.labels(service=_SERVICE_NAME, endpoint=request.url.path, status_code=response.status_code).inc()
+    REQUEST_LATENCY.labels(service=_SERVICE_NAME, endpoint=request.url.path).observe(duration)
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 
 # ── Health endpoints ──────────────────────────────────────────────────────── #
 
@@ -73,6 +178,60 @@ async def readiness():
     )
 
 
+# ── REST endpoint: explicit session reset ────────────────────────────────── #
+
+@app.post("/reset_session")
+async def reset_session(body: dict[str, Any]):
+    """Drop this session_id's GestureSegmenter/TrackState/KeypointSmoother
+    immediately instead of waiting up to SESSION_IDLE_TTL (5 min).
+
+    Without this, a session_id reused across unrelated recognition runs
+    (e.g. a video-upload session followed by a live-camera session using
+    the same session_id, which the client currently does) inherits
+    whatever mid-gesture state GestureSegmenter was left in by the
+    PREVIOUS run -- e.g. still ACTIVE and waiting for an offset that never
+    comes, silently absorbing new frames into a stale segment instead of
+    starting fresh. Symptom: live recognition looks completely dead after
+    switching from video-upload/another mode, with nothing in the logs
+    suggesting why. Called by api_gateway's WS handler on "end_session".
+
+    Before evicting, if the segmenter is still ACTIVE (a gesture in
+    progress that never reached its natural offset), force-classify
+    whatever was captured instead of silently throwing it away. Real
+    regression: short (~a couple seconds) uploaded clips recognized
+    nothing at all -- real DIAG logs showed genuine gestures regularly
+    running 100+ frames before naturally closing (offset_streak kept
+    getting reset by ordinary motion noise, only settling by luck or by
+    hitting GESTURE_MAX_FRAMES), so a short clip's frames simply ran out
+    first, evicting an ACTIVE segment with a real, classifiable gesture in
+    it and never attempting a classification at all.
+
+    Body: {"session_id": str}
+    Returns: {"evicted": bool, "glosses": list[dict]} -- glosses is the
+    force-flushed classification (top-3, same shape as /process_frame's),
+    or [] if nothing was mid-gesture.
+    """
+    session_id = body.get("session_id", "")
+    if not session_id:
+        return JSONResponse(status_code=400, content={"error": "session_id required"})
+
+    glosses: list[dict] = []
+    seg = _session_segmenters.get(session_id)
+    if seg is not None:
+        lock = _session_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            window = seg.force_flush()
+        if window is not None:
+            norm_win = _normalizer(window)
+            glosses = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+            logger.info("session=%s force_flush on reset top1=%s conf=%.2f",
+                        session_id[:8], glosses[0]["gloss"], glosses[0]["prob"])
+
+    evicted = _evict_session(session_id)
+    logger.info("session=%s reset_session evicted=%s", session_id[:8], evicted)
+    return {"evicted": evicted, "glosses": glosses}
+
+
 # ── REST endpoint (single frame) ─────────────────────────────────────────── #
 
 @app.post("/process_frame")
@@ -89,14 +248,87 @@ async def process_frame(body: dict[str, Any]):
     if frame is None:
         return JSONResponse(status_code=400, content={"error": "cannot decode image"})
 
-    kp = await asyncio.to_thread(_extractor.extract, frame)
+    session_id = body.get("session_id", "")
+    h, w = frame.shape[:2]
 
-    # Build a dummy full window by repeating the single frame
-    window = np.stack([kp] * cfg.WINDOW_SIZE, axis=0)
-    window = _normalizer(window)
-    results = await asyncio.to_thread(_classifier.predict_top3, window)
+    # Touch before doing any work, not after — a session mid-request (however
+    # long extraction/classification takes) must never look idle to the
+    # cleanup sweep, and this also "revives" a session that _cleanup_idle_sessions
+    # is about to (or just did) evict.
+    _session_last_access[session_id] = time.monotonic()
 
-    return {"session_id": body.get("session_id", ""), "glosses": results}
+    # Per-session state (GestureSegmenter/KeypointSmoother/TrackState) is
+    # mutated below and is NOT safe under concurrent access — a lock keeps
+    # frames for the same session strictly serialized even if the client (or
+    # a future pipelining change) ever has more than one request for that
+    # session in flight at once. Different sessions still run fully in
+    # parallel (each gets its own lock).
+    lock = _session_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        track = _session_tracks.setdefault(session_id, TrackState())
+        kp = await asyncio.to_thread(_extractor.extract, frame, track)
+
+        if cfg.SMOOTHING_ENABLED:
+            smoother = _session_smoothers.setdefault(session_id, KeypointSmoother())
+            kp = smoother.smooth(kp, time.monotonic())
+
+        person_detected = bool(np.any(kp != 0))
+        kp_list = kp.tolist()  # (75, 3) – sent to client for skeleton overlay
+
+        seg = _session_segmenters.setdefault(session_id, GestureSegmenter(session_id=session_id))
+
+        # Periodic diagnostic log (every DIAG_LOG_INTERVAL frames) — activity
+        # score included for empirical threshold tuning (see GESTURE_*
+        # constants in config.py).
+        _diag_counters[session_id] = _diag_counters.get(session_id, 0) + 1
+        if _diag_counters[session_id] % cfg.DIAG_LOG_INTERVAL == 0:
+            # Per-region breakdown, not just a combined total — the combined
+            # number alone can't tell you whether it's the whole person
+            # dropping out (bad framing/lighting/distance) or specifically
+            # the hands during motion (see HAND_LOW_CONF_ZERO_THRESHOLD).
+            # scripts/analyze_cv_logs.py parses this exact "kp=body:.. lhand:..
+            # rhand:.." format — keep them in sync if this line changes.
+            body_nz  = int(np.count_nonzero(kp[0:33, 0]))
+            lhand_nz = int(np.count_nonzero(kp[33:54, 0]))
+            rhand_nz = int(np.count_nonzero(kp[54:75, 0]))
+            logger.info(
+                "DIAG session=%s %s size=%dx%d person=%s "
+                "kp=body:%d/33 lhand:%d/21 rhand:%d/21 total:%d/75",
+                session_id[:8], seg.debug_state, w, h, person_detected,
+                body_nz, lhand_nz, rhand_nz, body_nz + lhand_nz + rhand_nz,
+            )
+
+        window, gesture_active, is_preview = seg.push(kp)
+
+        if window is None:
+            return {"session_id": session_id, "glosses": [], "keypoints": kp_list,
+                    "person_detected": person_detected, "gesture_active": gesture_active,
+                    "preview": False}
+
+        norm_win = _normalizer(window)
+        # TTA only for the FINAL classification — previews stay single-pass
+        # for speed, since they're provisional anyway and get superseded.
+        if cfg.TTA_ENABLED and not is_preview:
+            results = await asyncio.to_thread(_classifier.predict_top3_tta, norm_win)
+        else:
+            results = await asyncio.to_thread(_classifier.predict_top3, norm_win)
+
+        logger.info("session=%s top1=%s conf=%.2f gesture_active=%s preview=%s",
+                    session_id[:8], results[0]["gloss"], results[0]["prob"], gesture_active, is_preview)
+
+        response: dict = {"session_id": session_id, "glosses": results, "keypoints": kp_list,
+                           "person_detected": person_detected, "gesture_active": gesture_active,
+                           "preview": is_preview}
+        if not is_preview:
+            # The just-completed gesture's own frames (raw, pre-normalizer —
+            # same [0,1]-ish coordinate convention as `keypoints` above, not
+            # z-scored) — lets the client show/scrub the actual gesture that
+            # was classified instead of only ever the single current live
+            # frame, which (especially right after the person stops moving,
+            # e.g. at the end of an uploaded video) stopped being
+            # representative of the recognized sign within about a second.
+            response["gesture_keypoints"] = window.tolist()
+        return response
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────── #

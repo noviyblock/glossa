@@ -1,5 +1,4 @@
 /stgcn_topk_int8
 /qwen2_merged_qwen2_1.5b
-/qwen2_lora
-/qwen2_lora_qwen2_1.5b_slovo_synth
-/qwen2_merged_qwen25_7b
+/qwen2_lora_top200_qwen2_1.5b_slovo_synth
+/gloss_clips

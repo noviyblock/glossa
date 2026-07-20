@@ -63,8 +63,14 @@ format: ## Run black formatter
 check: lint format ## Run lint + format
 
 ## ── Testing ──────────────────────────────────────────────────────────────────
+# Top-level tests/ referenced here never existed in this repo; services/*/tests
+# (the only test suites that did) were archived to
+# archive/legacy_tests_pre_flatfile_refactor/ -- they import from a deleted
+# services/*/app/ package and don't run against current code. Real tests
+# against current flat-file modules are only starting to exist (see
+# services/api_gateway/tests/) -- most services still have none.
 test: ## Run pytest test suite
-	pytest tests/ services/ -v --tb=short
+	pytest services/ -v --tb=short
 
 ## ── MLflow & DVC ─────────────────────────────────────────────────────────────
 mlflow-ui: ## Start MLflow and open UI at http://localhost:5000
