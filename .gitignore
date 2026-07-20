@@ -1,6 +1,28 @@
 # Diploma text (local only)
 diploma_text.txt
 
+# Project description / presentation writeups for defense/evaluation (local only, not shipped)
+PROJECT_DESCRIPTION.md
+PRESENTATION_TEXT.md
+
+# Session working notes / scratch analysis -- audit findings, calibration
+# protocols, ad-hoc dumps -- meant to inform in-session decisions, not to
+# ship as project docs. Accidentally committed once via a broad `git add
+# -A` (see git history); ignored explicitly now so that doesn't repeat.
+AUDIT.md
+DIAGNOSIS_CLASS_COLLAPSE.md
+FAKE_RESULTS_AUDIT.md
+GAPS_ARCHIVED.md
+GESTURE_CONFUSION_MATRIX_FINDINGS.md
+GPU_VM_VALIDATION.md
+RSL_CONSULTANT_QUESTIONS.md
+RTMLIB_MODE_BENCHMARK.md
+SEGMENTER_CALIBRATION.md
+TECHNICAL_ASSESSMENT.md
+TRIAGE_MEMORY_GAZETA.md
+VM_RUN_PROTOCOL.md
+vocab_dump.txt
+
 # rtmlib model cache (downloaded at runtime on VM)
 rtmlib_cache/
 
