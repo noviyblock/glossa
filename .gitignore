@@ -1,8 +1,9 @@
 # Diploma text (local only)
 diploma_text.txt
 
-# Project description for defense/evaluation writeup (local only, not shipped)
+# Project description / presentation writeups for defense/evaluation (local only, not shipped)
 PROJECT_DESCRIPTION.md
+PRESENTATION_TEXT.md
 
 # Session working notes / scratch analysis -- audit findings, calibration
 # protocols, ad-hoc dumps -- meant to inform in-session decisions, not to
