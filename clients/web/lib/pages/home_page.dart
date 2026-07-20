@@ -34,6 +34,18 @@ class _GlossItem {
 // would discard as noise.
 const double _kMinDisplayConfidence = 0.15;
 
+// Two-party call UI hidden for now -- `flutter run -d chrome` opens one
+// tab per debug session and a second manually-opened tab against the same
+// dev server doesn't get a working Flutter instance (a `flutter run`
+// debug-mode limitation, not a bug in the call feature itself), which
+// made it impractical to test two participants side by side. Backend
+// (call_manager.py, /api/v1/call/*, the WS/REST relay) is untouched and
+// still fully working -- this only hides the client entry point so it's
+// not reachable from the UI while off. Flip back to true once testing via
+// two independent `flutter build web` + static-server tabs (or two real
+// devices) instead of two `flutter run` processes.
+const bool _kCallFeatureEnabled = false;
+
 // ── HomePage ──────────────────────────────────────────────────────────────────── //
 
 class HomePage extends StatefulWidget {
@@ -547,21 +559,22 @@ class _HomePageState extends State<HomePage> {
           ],
         ]),
         actions: [
-          _callId != null
-              ? Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: Chip(
-                    avatar: const Icon(Icons.call, size: 16),
-                    label: Text('Звонок: $_callId', style: const TextStyle(fontSize: 12)),
-                    visualDensity: VisualDensity.compact,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          if (_kCallFeatureEnabled)
+            _callId != null
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    child: Chip(
+                      avatar: const Icon(Icons.call, size: 16),
+                      label: Text('Звонок: $_callId', style: const TextStyle(fontSize: 12)),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  )
+                : IconButton(
+                    tooltip: 'Двусторонний звонок',
+                    icon: const Icon(Icons.call, size: 20),
+                    onPressed: _callBusy ? null : () => _showCallDialog(context),
                   ),
-                )
-              : IconButton(
-                  tooltip: 'Двусторонний звонок',
-                  icon: const Icon(Icons.call, size: 20),
-                  onPressed: _callBusy ? null : () => _showCallDialog(context),
-                ),
           SizedBox(
             width: 210,
             child: _UrlField(
