@@ -51,6 +51,11 @@ class GestureSegmenter:
         self._preroll: deque[np.ndarray] = deque(maxlen=GESTURE_PREROLL_FRAMES)
         self._last_activity = 0.0
         self._preview_emitted = False
+        # Rolling record of the last GESTURE_OFFSET_FRAMES hands_present
+        # values, updated on every push() regardless of state -- lets
+        # force_flush() tell "hands genuinely went still/ended" apart from
+        # "tracking was simply lost" (see force_flush's docstring).
+        self._recent_hands_present: deque[bool] = deque(maxlen=GESTURE_OFFSET_FRAMES)
 
     # ------------------------------------------------------------------ #
 
@@ -68,6 +73,7 @@ class GestureSegmenter:
         kp = kp.astype(np.float32)
         activity, hands_present = self._compute_activity(kp)
         self._last_activity = activity
+        self._recent_hands_present.append(hands_present)
 
         if self._state == "IDLE":
             result = self._push_idle(kp, activity, hands_present)
@@ -192,7 +198,31 @@ class GestureSegmenter:
         self._preroll.clear()
 
     def force_flush(self) -> np.ndarray | None:
-        """Classify whatever is currently accumulated, then reset."""
+        """Classify whatever is currently accumulated, then reset.
+
+        Real regression (see cv_service/main.py's /reset_session, which
+        calls this when a session ends mid-gesture): force-flushing a
+        segment whose hand tracking was LOST right at the end (person
+        stepped out of frame, occlusion, motion blur -- confirmed by a
+        real DIAG log showing rhand:0/21 in the frames right before
+        eviction) feeds a degraded/zeroed tail into the classifier, which
+        -- like any softmax classifier on out-of-distribution input -- can
+        still return an artificially confident-looking WRONG top-1
+        instead of "I don't know". That bogus gloss then gets buffered and
+        handed to the LLM alongside whatever else was recognized, which
+        produced a real observed nonsense sentence downstream.
+
+        If hands weren't tracked in ANY of the last GESTURE_OFFSET_FRAMES
+        frames, there's nothing reliable to classify -- same treatment as
+        a segment that never reached GESTURE_MIN_FRAMES (returns None).
+        """
+        if self._recent_hands_present and not any(self._recent_hands_present):
+            logger.warning(
+                "session=%s force_flush skipped: hands not tracked in last %d frames",
+                self._session_id[:8], len(self._recent_hands_present),
+            )
+            self.force_reset()
+            return None
         window = self._finish_segment()
         self.force_reset()
         return window

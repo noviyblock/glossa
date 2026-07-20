@@ -239,6 +239,44 @@ def test_force_flush_classifies_pending_segment():
     assert seg.debug_state["state"] == "IDLE"
 
 
+def test_force_flush_skips_when_hand_tracking_lost_at_the_end():
+    """Real regression: a session ending right after hand tracking is lost
+    (person stepped out of frame, occlusion) must not force-flush a
+    degraded/zeroed tail into the classifier -- confirmed by a real DIAG
+    log (rhand:0/21 in the frames right before eviction) followed by a
+    spurious classification and a nonsense downstream LLM sentence."""
+    seg = GestureSegmenter("s11")
+    _push_still(seg, 2)
+    _push_moving(seg, GESTURE_ONSET_FRAMES + GESTURE_MIN_FRAMES + 5)
+    assert seg.debug_state["state"] == "ACTIVE"
+
+    # Hands vanish for the last GESTURE_OFFSET_FRAMES frames (tracking
+    # lost, not a genuine gesture ending).
+    for _ in range(GESTURE_OFFSET_FRAMES):
+        seg.push(_make_frame(0.0, conf=0.0))
+
+    window = seg.force_flush()
+
+    assert window is None
+    assert seg.debug_state["state"] == "IDLE"  # still cleanly reset, not stuck ACTIVE
+
+
+def test_force_flush_still_classifies_when_hands_return_before_flush():
+    """A brief mid-gesture occlusion (hands come back before the session
+    actually ends) must NOT block force_flush -- the gate only looks at
+    the most recent frames, not the whole segment's history."""
+    seg = GestureSegmenter("s12")
+    _push_still(seg, 2)
+    _push_moving(seg, GESTURE_ONSET_FRAMES + GESTURE_MIN_FRAMES + 5)
+    for _ in range(2):
+        seg.push(_make_frame(0.0, conf=0.0))  # brief occlusion, not the end
+    _push_moving(seg, GESTURE_OFFSET_FRAMES + 2)  # hands return
+
+    window = seg.force_flush()
+
+    assert window is not None
+
+
 def test_no_person_never_leaves_idle():
     seg = GestureSegmenter("s10")
     for _ in range(30):
