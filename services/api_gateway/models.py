@@ -91,6 +91,7 @@ class TranslateResponse(BaseModel):
     glosses: list[dict] | None = None
     audio_wav: str | None = None        # base64 WAV (text_to_rsl only)
     video_mp4: str | None = None        # base64 MP4, sign clips (text_to_rsl only)
+    skeleton_sequences: list[dict] | None = None  # [{"gloss","frames"}, ...] (text_to_rsl only)
     latency_ms: float
     cached: bool = False
 

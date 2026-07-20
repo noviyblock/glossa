@@ -315,6 +315,28 @@ class Orchestrator:
             logger.warning("TTS sign_video error session=%s: %s", session_id, exc)
             return None
 
+    async def _render_skeleton_sequence(self, session_id: str, gloss_sequence: str) -> list[dict] | None:
+        """gloss_sequence -> per-gloss skeleton keypoint sequences via TTS
+        /skeleton_sequence — alternative to _render_sign_video for clients
+        that play back a skeleton (see clients/web's _skeletonPanel)
+        instead of / alongside the concatenated-clip video. None covers
+        both "nothing matched" and "the call failed", same as
+        _render_sign_video. Never raises.
+        """
+        if not gloss_sequence:
+            return None
+        try:
+            resp = await self._http.post(
+                f"{TTS_SERVICE_URL}/skeleton_sequence",
+                json={"gloss_sequence": gloss_sequence},
+            )
+            resp.raise_for_status()
+            sequences = resp.json().get("sequences")
+            return sequences or None
+        except Exception as exc:
+            logger.warning("TTS skeleton_sequence error session=%s: %s", session_id, exc)
+            return None
+
     async def delete_last_pending(self, session_id: str) -> list[list[dict]]:
         """User-initiated correction: drop the most recently buffered
         gesture (e.g. it was misrecognized). Returns the updated buffer so
@@ -378,6 +400,10 @@ class Orchestrator:
         # 4. TTS service — render gloss_sequence as concatenated sign clips.
         video_b64 = await self._render_sign_video(session_id, gloss_sequence)
 
+        # 5. TTS service — render gloss_sequence as skeleton keypoint
+        # sequences (see clients/web's _skeletonPanel playback).
+        skeleton_sequences = await self._render_skeleton_sequence(session_id, gloss_sequence)
+
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         logger.info("text_to_rsl latency=%.1fms session=%s", latency_ms, session_id)
 
@@ -387,7 +413,8 @@ class Orchestrator:
         })
 
         return {"text": russian_text, "gloss_sequence": gloss_sequence,
-                "wav_b64": wav_b64, "video_b64": video_b64}
+                "wav_b64": wav_b64, "video_b64": video_b64,
+                "skeleton_sequences": skeleton_sequences}
 
     # ── Synchronous REST orchestration ────────────────────────────────────── #
 
@@ -426,10 +453,12 @@ class Orchestrator:
             gloss_seq = await self._translate_reverse(session_id, text)
             wav_b64 = await self._synthesize_audio(session_id, text)
             video_b64 = await self._render_sign_video(session_id, gloss_seq)
+            skeleton_sequences = await self._render_skeleton_sequence(session_id, gloss_seq)
             return {
                 "translation": gloss_seq,
                 "audio_wav": wav_b64,
                 "video_mp4": video_b64,
+                "skeleton_sequences": skeleton_sequences,
                 "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
             }
 

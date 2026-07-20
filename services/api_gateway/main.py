@@ -175,6 +175,7 @@ async def translate(req: TranslateRequest):
                     "text": result["translation"],
                     "audio": result.get("audio_wav") or None,
                     "video": result.get("video_mp4"),
+                    "skeleton_sequences": result.get("skeleton_sequences"),
                 },
                 "session_id": peer_id,
             })
@@ -184,6 +185,7 @@ async def translate(req: TranslateRequest):
         glosses=result.get("glosses"),
         audio_wav=result.get("audio_wav"),
         video_mp4=result.get("video_mp4"),
+        skeleton_sequences=result.get("skeleton_sequences"),
         latency_ms=result["latency_ms"],
     )
 
@@ -237,6 +239,7 @@ async def ws_translate(ws: WebSocket, mode: str):
         {"type": "result",  "payload": {"text": str, "confidence": float},      "session_id": "..."}
         {"type": "audio",   "payload": {"wav": "<base64>"},                     "session_id": "..."}
         {"type": "video",   "payload": {"video": "<base64 mp4>"},               "session_id": "..."}
+        {"type": "skeleton", "payload": {"sequences": [{"gloss","frames"},...]},  "session_id": "..."}
         {"type": "error",   "payload": {"message": str},                        "session_id": "..."}
         {"type": "peer_message", "payload": {"text": str, "audio": str|None, "video": str|None},
                                                                                   "session_id": "..."}
@@ -356,6 +359,7 @@ async def ws_translate(ws: WebSocket, mode: str):
                 gloss_sequence = result["gloss_sequence"]
                 wav_b64        = result["wav_b64"]
                 video_b64      = result.get("video_b64")
+                skeleton_seqs  = result.get("skeleton_sequences")
 
                 # 1. Recognised text (partial chunk)
                 if russian_text:
@@ -373,12 +377,19 @@ async def ws_translate(ws: WebSocket, mode: str):
                 if video_b64:
                     await _send("video", {"video": video_b64})
 
+                # 4b. Skeleton keypoint sequences — best-effort alternative
+                # to the video, for clients that play back a skeleton
+                # instead (see SkeletonSequenceProvider).
+                if skeleton_seqs:
+                    await _send("skeleton", {"sequences": skeleton_seqs})
+
                 # 5. Relay to call partner, if any -- one message carrying
-                # everything (gloss text + audio + video) so the peer's
-                # client handles it as one incoming turn, not three.
-                if gloss_sequence or wav_b64 or video_b64:
+                # everything (gloss text + audio + video/skeleton) so the
+                # peer's client handles it as one incoming turn, not several.
+                if gloss_sequence or wav_b64 or video_b64 or skeleton_seqs:
                     await _relay_to_peer({
                         "text": gloss_sequence, "audio": wav_b64 or None, "video": video_b64,
+                        "skeleton_sequences": skeleton_seqs,
                     })
 
             # ── End session ─────────────────────────────────────────────── #

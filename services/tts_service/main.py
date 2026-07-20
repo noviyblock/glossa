@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+from skeleton import SkeletonSequenceProvider
 from synthesizer import Synthesizer
 from video import SignVideoAssembler
 
@@ -18,15 +19,26 @@ logger = logging.getLogger("tts_service")
 
 _synthesizer: Synthesizer | None = None
 _video: SignVideoAssembler | None = None
+_skeleton: SkeletonSequenceProvider | None = None
 _ready = False
 _START = time.time()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _synthesizer, _video, _ready
+    global _synthesizer, _video, _skeleton, _ready
     _synthesizer = Synthesizer()
     _video = SignVideoAssembler()
+    try:
+        _skeleton = SkeletonSequenceProvider()
+    except FileNotFoundError as exc:
+        # processed_64_200 is a DVC-tracked dataset directory, not a small
+        # config file -- missing on a host that hasn't run `dvc pull` for
+        # it. Same non-fatal-degradation pattern as SignVideoAssembler's
+        # own "no clip matched" case: /skeleton_sequence just returns an
+        # empty list instead of taking the whole service down.
+        logger.warning("SkeletonSequenceProvider unavailable (%s) — /skeleton_sequence will return no frames", exc)
+        _skeleton = None
     _ready = True
     yield
 
@@ -157,3 +169,38 @@ async def sign_video(body: dict):
         latency_ms, video_b64 is not None, gloss_sequence[:60],
     )
     return {"video": video_b64, "total": total, "latency_ms": latency_ms}
+
+
+# ── POST /skeleton_sequence ───────────────────────────────────────────────── #
+
+@app.post("/skeleton_sequence")
+async def skeleton_sequence(body: dict):
+    """Render a gloss sequence as per-gloss skeleton keypoint sequences for
+    client-side playback (see SkeletonSequenceProvider) — an alternative to
+    /sign_video's concatenated clip, reusing the same per-gesture keypoint
+    data the ST-GCN classifier trains on.
+
+    Body:     {"gloss_sequence": "ПРИВЕТ КАК ДЕЛА"}
+    Response: {"sequences": [{"gloss": str, "frames": [[[x,y,conf],...75],...T]}, ...],
+               "total": int, "latency_ms": float}
+
+    `sequences` omits tokens with no matching sample — same best-effort
+    semantics as /sign_video, not a guaranteed hit for every gloss.
+    """
+    gloss_sequence = body.get("gloss_sequence", "").strip()
+    if not gloss_sequence:
+        return JSONResponse(status_code=400, content={"error": "gloss_sequence is empty"})
+
+    total = len(gloss_sequence.split())
+
+    t0 = time.perf_counter()
+    sequences = (
+        await asyncio.to_thread(_skeleton.get, gloss_sequence) if _skeleton is not None else []
+    )
+    latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    logger.info(
+        "skeleton_sequence latency=%.1fms matched=%d/%d gloss_sequence=%r",
+        latency_ms, len(sequences), total, gloss_sequence[:60],
+    )
+    return {"sequences": sequences, "total": total, "latency_ms": latency_ms}

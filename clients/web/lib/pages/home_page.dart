@@ -62,6 +62,12 @@ class _HomePageState extends State<HomePage> {
   Timer? _frameTimer;
   bool _cameraActive = false;
   String _cameraError = '';
+  // Set instead of _mediaStream when the frame source is an uploaded video
+  // file rather than a live webcam (see _startVideoFile) -- same
+  // _video/_canvas/_frameTimer/WS pipeline either way, _sendFrame() doesn't
+  // care where _video's pixels come from. Used by _stopCamera to release
+  // the object URL instead of stopping (nonexistent) MediaStream tracks.
+  String? _videoObjectUrl;
 
   // ── RSL → Text WS ────────────────────────────────────────────────────────── //
   WebSocketChannel? _rslWs;
@@ -83,6 +89,16 @@ class _HomePageState extends State<HomePage> {
   bool _showSkeleton = false;
   Timer? _animTimer;          // 30fps render tick
   Timer? _hideSkeletonTimer;  // 500ms holdout before hiding skeleton
+
+  // Skeleton playback of typed text->RSL glosses (see _skeletonPanel) —
+  // separate from the live-camera path above: these are pre-recorded
+  // frames from a real gesture example (services/tts_service/skeleton.py),
+  // not noisy live tracking, so they're written straight to _displayKp
+  // without the EMA smoothing _animateSkeleton applies to the live feed
+  // (smoothing pre-recorded frames would just add lag, not reduce jitter).
+  Timer? _textSkeletonTimer;
+  List<List<List<double>>> _textSkeletonFrames = [];
+  int _textSkeletonIdx = 0;
 
   // RSL recognition chat (panel 3)
   final List<_Msg> _rslMsgs = [];
@@ -120,6 +136,10 @@ class _HomePageState extends State<HomePage> {
   // ── Camera ───────────────────────────────────────────────────────────────── //
 
   Future<void> _startCamera() async {
+    // Live camera takes over the skeleton panel -- stop any typed-text
+    // playback so the two don't write _displayKp at the same time.
+    _textSkeletonTimer?.cancel();
+    _textSkeletonTimer = null;
     try {
       // Ideal, not exact -- requests the higher resolution but falls back
       // gracefully to whatever the camera actually supports instead of
@@ -187,6 +207,59 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // Opens a file picker and, on selection, recognizes gestures from the
+  // uploaded video instead of a live camera -- same _video/_canvas/WS
+  // pipeline as _startCamera below it, _sendFrame() doesn't know or care
+  // whether _video's current frame came from a live MediaStream or a
+  // <video> playing an uploaded file.
+  Future<void> _pickVideoFile() async {
+    final input = web.HTMLInputElement()
+      ..type = 'file'
+      ..accept = 'video/*';
+    input.click();
+    await input.onChange.first;
+    final files = input.files;
+    if (files == null || files.length == 0) return;
+    final file = files.item(0);
+    if (file == null) return;
+    await _startVideoFile(file);
+  }
+
+  Future<void> _startVideoFile(web.File file) async {
+    // Live camera and file playback both drive the same skeleton panel --
+    // stop the other one first so they don't fight over _displayKp/_video.
+    _textSkeletonTimer?.cancel();
+    _textSkeletonTimer = null;
+    try {
+      final url = web.URL.createObjectURL(file);
+      _videoObjectUrl = url;
+      _video = web.HTMLVideoElement()
+        ..src = url
+        ..autoplay = true
+        ..muted = true
+        ..loop = false;
+      try { await _video!.play().toDart; } catch (_) {}
+      // Stop automatically once the file finishes playing, same cleanup
+      // path as pressing "Стоп" on a live camera.
+      _video!.onEnded.listen((_) {
+        if (mounted && _cameraActive) _stopCamera();
+      });
+      _canvas = web.HTMLCanvasElement()..width = 1280..height = 720;
+      if (mounted) setState(() => _cameraActive = true);
+      await _connectRslWs();
+      // Real-time cadence (not "as fast as possible") -- GestureSegmenter's
+      // onset/offset thresholds and GESTURE_MIN_FRAMES/MAX_FRAMES are tuned
+      // against real hand-motion speed; feeding it frames faster than the
+      // video's own real-time playback would look like abnormally fast
+      // signing to the segmenter, same concern as the earlier session-wide
+      // discussion of segmentation timing.
+      _frameTimer = Timer.periodic(const Duration(milliseconds: 20), (_) => _sendFrame());
+      _animTimer = Timer.periodic(const Duration(milliseconds: 33), _animateSkeleton);
+    } catch (e) {
+      if (mounted) setState(() => _cameraError = '$e');
+    }
+  }
+
   void _stopCamera() {
     _frameTimer?.cancel();
     _frameTimer = null;
@@ -196,6 +269,10 @@ class _HomePageState extends State<HomePage> {
     _hideSkeletonTimer = null;
     _mediaStream?.getTracks().toDart.forEach((t) => t.stop());
     _mediaStream = null;
+    if (_videoObjectUrl != null) {
+      web.URL.revokeObjectURL(_videoObjectUrl!);
+      _videoObjectUrl = null;
+    }
     _disconnectRslWs();
     if (mounted) setState(() {
       _cameraActive = false;
@@ -379,6 +456,11 @@ class _HomePageState extends State<HomePage> {
         setState(() => _signVideoB64 = (videoB64 != null && videoB64.isNotEmpty) ? videoB64 : null);
         break;
 
+      case 'skeleton':
+        final sequences = payload['sequences'] as List<dynamic>?;
+        if (sequences != null && sequences.isNotEmpty) _playTextSkeleton(sequences);
+        break;
+
       case 'error':
         setState(() => _rslStatus = _WsStatus.error);
         break;
@@ -387,13 +469,17 @@ class _HomePageState extends State<HomePage> {
         final text = payload['text'] as String? ?? '';
         final audio = payload['audio'] as String?;
         final video = payload['video'] as String?;
-        if (text.isEmpty && (audio == null || audio.isEmpty) && (video == null || video.isEmpty)) break;
+        final peerSkeletons = payload['skeleton_sequences'] as List<dynamic>?;
+        final hasSkeletons = peerSkeletons != null && peerSkeletons.isNotEmpty;
+        if (text.isEmpty && (audio == null || audio.isEmpty) &&
+            (video == null || video.isEmpty) && !hasSkeletons) break;
         setState(() {
           _rslMsgs.add(_Msg(text.isNotEmpty ? '👥 $text' : '👥 (аудио/видео)'));
           if (video != null && video.isNotEmpty) _signVideoB64 = video;
         });
         _scrollToBottom(_rslScrollCtrl);
         if (audio != null && audio.isNotEmpty) _playAudio(audio);
+        if (hasSkeletons) _playTextSkeleton(peerSkeletons);
         break;
     }
   }
@@ -498,6 +584,7 @@ class _HomePageState extends State<HomePage> {
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
       final glosses = data['translation'] as String? ?? '';
       final videoB64 = data['video_mp4'] as String?;
+      final skeletonSeqs = data['skeleton_sequences'] as List<dynamic>?;
       if (glosses.isNotEmpty && mounted) {
         setState(() {
           _glossMsgs.add(_Msg(glosses));
@@ -505,10 +592,57 @@ class _HomePageState extends State<HomePage> {
         });
         _scrollToBottom(_glossScrollCtrl);
       }
+      if (skeletonSeqs != null && skeletonSeqs.isNotEmpty) _playTextSkeleton(skeletonSeqs);
     } catch (_) {
     } finally {
       if (mounted) setState(() => _ttsProcessing = false);
     }
+  }
+
+  // ── Skeleton playback of typed text->RSL glosses ─────────────────────────── //
+  //
+  // `sequences` is [{"gloss": str, "frames": [[[x,y,conf],...75],...T]}, ...]
+  // from tts_service's /skeleton_sequence (see orchestrator.py's
+  // _render_skeleton_sequence). Plays each gloss's frames back to back at a
+  // fixed rate into the same _skeletonPanel that shows the live camera feed
+  // -- whichever source wrote _displayKp most recently is what's on screen;
+  // starting the camera cancels this timer (see _startCamera) so the two
+  // don't fight over the same panel.
+  void _playTextSkeleton(List<dynamic> sequences) {
+    _textSkeletonTimer?.cancel();
+    final frames = <List<List<double>>>[];
+    for (final seq in sequences) {
+      final raw = (seq as Map<String, dynamic>)['frames'] as List<dynamic>? ?? [];
+      for (final frame in raw) {
+        frames.add((frame as List<dynamic>)
+            .map((p) => (p as List<dynamic>).map((v) => (v as num).toDouble()).toList())
+            .toList());
+      }
+      // Short pause (zero-confidence frame, renders as "nobody") between
+      // glosses so consecutive signs don't blend into one motion blur.
+      if (frames.isNotEmpty) {
+        frames.add(List<List<double>>.generate(75, (_) => [0.0, 0.0, 0.0]));
+      }
+    }
+    if (frames.isEmpty) return;
+
+    _textSkeletonFrames = frames;
+    _textSkeletonIdx = 0;
+    setState(() {
+      _showSkeleton = true;
+      _displayKp = _textSkeletonFrames[0];
+    });
+    // ~25fps -- matches the WINDOW_SIZE=64-frame clips' original capture
+    // cadence closely enough for a natural-looking playback speed.
+    _textSkeletonTimer = Timer.periodic(const Duration(milliseconds: 40), (timer) {
+      _textSkeletonIdx++;
+      if (_textSkeletonIdx >= _textSkeletonFrames.length) {
+        timer.cancel();
+        return;
+      }
+      if (!mounted) { timer.cancel(); return; }
+      setState(() => _displayKp = _textSkeletonFrames[_textSkeletonIdx]);
+    });
   }
 
   void _playAudio(String base64Wav) {
@@ -721,6 +855,20 @@ class _HomePageState extends State<HomePage> {
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
               ),
+              if (!_cameraActive) ...[
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: _pickVideoFile,
+                  icon: const Icon(Icons.upload_file, size: 16),
+                  label: const Text('Видео', style: TextStyle(fontSize: 13)),
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: Colors.white.withValues(alpha: 0.85),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ],
               if (_cameraActive) ...[
                 const SizedBox(width: 8),
                 // Passive status pill — gesture detection is automatic
@@ -934,6 +1082,7 @@ class _HomePageState extends State<HomePage> {
     _stopCamera();
     _animTimer?.cancel();
     _hideSkeletonTimer?.cancel();
+    _textSkeletonTimer?.cancel();
     _rslSub?.cancel();
     _rslWs?.sink.close();
     _textCtrl.dispose();

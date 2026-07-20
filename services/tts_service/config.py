@@ -15,3 +15,8 @@ TORCH_HOME       = os.getenv("TORCH_HOME", "/models/torch_cache")
 # concat demuxer без ре-энкода).
 GLOSS_CLIPS_DIR   = os.getenv("GLOSS_CLIPS_DIR", "/models/gloss_clips")
 CLASS_TO_IDX_PATH = os.getenv("CLASS_TO_IDX_PATH", "/data/class_to_idx.json")
+
+# gloss -> skeleton keypoint sequence (see skeleton.py) — alternative to
+# GLOSS_CLIPS_DIR's video clips, reusing the same per-gesture keypoint data
+# the ST-GCN classifier trains on instead of separately-recorded video.
+PROCESSED_GESTURES_DIR = os.getenv("PROCESSED_GESTURES_DIR", "/data/gestures/processed_64_200")
