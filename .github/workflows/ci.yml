@@ -130,6 +130,15 @@ jobs:
             fi
           done
           pip install pytest pytest-asyncio pytest-cov fakeredis httpx anyio
+          # numpy/prometheus-client: real cv_service dependencies (see
+          # services/cv_service/pyproject.toml), needed at module-import
+          # time by the new gesture_segmenter/gesture_classifier tests --
+          # NOT a full `pip install -e services/cv_service`, which would
+          # also pull in openvino/opencv-python-headless/rtmlib for no
+          # reason (those are only imported lazily inside
+          # GestureClassifier._load_model/KeypointExtractor, neither of
+          # which these tests instantiate).
+          pip install numpy prometheus-client
 
       # services/*/tests previously imported from a services/*/app/ package
       # deleted by 0424891 ("flat-file services" refactor, 2026-06-20) and
