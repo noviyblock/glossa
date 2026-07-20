@@ -83,6 +83,21 @@ async def _cleanup_idle_sessions() -> None:
 async def lifespan(app: FastAPI):
     global _extractor, _normalizer, _classifier, _redis, _ready, _cleanup_task
     logger.info("Loading models…")
+    # onnxruntime silently falling back to CPU when RTMLIB_DEVICE=cuda was
+    # requested is a documented past failure mode (see Dockerfile's deps-gpu
+    # stage comments: CUDAExecutionProvider missing entirely from the
+    # available-providers list, not just failing to initialize) -- log the
+    # actual provider list at startup so that regression is visible instead
+    # of silently degrading to CPU-speed inference under a "cuda" label.
+    import onnxruntime as _ort
+    _providers = _ort.get_available_providers()
+    logger.info("onnxruntime available providers: %s", _providers)
+    if cfg.RTMLIB_DEVICE == "cuda" and "CUDAExecutionProvider" not in _providers:
+        logger.warning(
+            "RTMLIB_DEVICE=cuda requested but CUDAExecutionProvider is NOT in "
+            "onnxruntime's available providers -- extraction will silently run "
+            "on CPU. Check nvidia-container-toolkit / --gpus / GPU build target."
+        )
     _extractor  = KeypointExtractor()
     _normalizer = Normalizer(cfg.NORM_STATS_PATH)
     _classifier = GestureClassifier(
@@ -241,9 +256,19 @@ async def process_frame(body: dict[str, Any]):
         logger.info("session=%s top1=%s conf=%.2f gesture_active=%s preview=%s",
                     session_id[:8], results[0]["gloss"], results[0]["prob"], gesture_active, is_preview)
 
-        return {"session_id": session_id, "glosses": results, "keypoints": kp_list,
-                "person_detected": person_detected, "gesture_active": gesture_active,
-                "preview": is_preview}
+        response: dict = {"session_id": session_id, "glosses": results, "keypoints": kp_list,
+                           "person_detected": person_detected, "gesture_active": gesture_active,
+                           "preview": is_preview}
+        if not is_preview:
+            # The just-completed gesture's own frames (raw, pre-normalizer —
+            # same [0,1]-ish coordinate convention as `keypoints` above, not
+            # z-scored) — lets the client show/scrub the actual gesture that
+            # was classified instead of only ever the single current live
+            # frame, which (especially right after the person stops moving,
+            # e.g. at the end of an uploaded video) stopped being
+            # representative of the recognized sign within about a second.
+            response["gesture_keypoints"] = window.tolist()
+        return response
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────── #

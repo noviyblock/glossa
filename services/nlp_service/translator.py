@@ -162,7 +162,12 @@ class Translator:
             f"{h['gloss']} (вероятность: {h['prob']:.2f})" for h in hypotheses
         )
         if context:
-            ctx = "\n".join(context[-2:])  # last 1-2 turns — enough for local coherence, keeps prompt short
+            # Last 4, not 2 -- history is now shared across both translation
+            # directions (see orchestrator.py's process_frame/translate_sync),
+            # tagged by speaker ("Слышащий: .../Жестикулирующий: ..."), so 2
+            # entries could be just one side's last two turns with no reply
+            # in view at all. 4 keeps roughly one full exchange visible.
+            ctx = "\n".join(context[-4:])
             lines = f"Предыдущие фразы диалога:\n{ctx}\n\nВарианты глосс для текущего жеста:\n{lines}"
         return self.generate(TOPK_SYSTEM_PROMPT, lines)
 
@@ -185,6 +190,6 @@ class Translator:
             for i, pos in enumerate(positions)
         )
         if context:
-            ctx = "\n".join(context[-2:])
+            ctx = "\n".join(context[-4:])  # see translate_topk's comment on why 4, not 2
             lines = f"Предыдущие фразы диалога:\n{ctx}\n\nПозиции распознанных жестов:\n{lines}"
         return self.generate(SEQ_TOPK_SYSTEM_PROMPT, lines)

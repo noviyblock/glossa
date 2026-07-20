@@ -15,6 +15,8 @@ import redis.asyncio as aioredis
 from call_manager import CallManager
 from config import HTTP_TIMEOUT, REDIS_URL
 from models import (
+    AsrRequest,
+    AsrResponse,
     CallCreateRequest,
     CallCreateResponse,
     CallJoinRequest,
@@ -122,6 +124,24 @@ async def readiness():
         status_code=code,
         content={"service": "api-gateway", "status": "healthy" if all_ok else "degraded", "services": statuses},
     )
+
+
+# ── REST /api/v1/asr — mic-input transcription only ──────────────────────────── #
+
+@app.post("/api/v1/asr", response_model=AsrResponse)
+async def asr(req: AsrRequest):
+    """Speech to text only. Deliberately separate from /api/v1/translate --
+    the client records a mic clip, POSTs it here to get Russian text back,
+    then feeds that text through the exact same /api/v1/translate
+    text_to_rsl call typed text already uses, rather than this endpoint
+    re-running NLP/TTS/video/skeleton a second, parallel way."""
+    session_id = req.session_id or str(uuid.uuid4())
+    t0 = time.perf_counter()
+    try:
+        text = await _orchestrator.transcribe(session_id, req.audio)
+    except RuntimeError as exc:
+        return JSONResponse(status_code=503, content={"error": str(exc)})
+    return AsrResponse(text=text, latency_ms=round((time.perf_counter() - t0) * 1000, 1))
 
 
 # ── REST /api/v1/translate ─────────────────────────────────────────────────── #
@@ -311,14 +331,20 @@ async def ws_translate(ws: WebSocket, mode: str):
                     "person_detected": result.get("person_detected", False),
                     "gesture_active": result.get("gesture_active", False),
                     "preview": result.get("preview", False),
+                    "gesture_keypoints": result.get("gesture_keypoints"),
                 })
 
-                # 2. Send text translation as partial + final
+                # 2. Send text translation as partial + final, then voice it
+                # (a hearing person watching a signer otherwise only ever
+                # sees text, never hears the translation).
                 translation = result["translation"]
                 if translation:
                     await _send("chunk", {"text": translation, "is_final": False})
                     await _send("result", {"text": translation, "confidence": confidence})
-                    await _relay_to_peer({"text": translation})
+                    wav_b64 = result.get("wav_b64")
+                    if wav_b64:
+                        await _send("audio", {"wav": wav_b64})
+                    await _relay_to_peer({"text": translation, "audio": wav_b64 or None})
 
                 # 3. Buffered-sentence state, only when it actually changed
                 # this frame (gesture appended, or buffer just auto-flushed)
@@ -332,7 +358,10 @@ async def ws_translate(ws: WebSocket, mode: str):
                 if translation:
                     await _send("chunk", {"text": translation, "is_final": False})
                     await _send("result", {"text": translation, "confidence": 1.0})
-                    await _relay_to_peer({"text": translation})
+                    wav_b64 = flush_result.get("wav_b64")
+                    if wav_b64:
+                        await _send("audio", {"wav": wav_b64})
+                    await _relay_to_peer({"text": translation, "audio": wav_b64 or None})
                 await _send("pending_sentence", {"positions": flush_result["pending_positions"]})
 
             elif msg_type == "delete_last_gesture" and mode == "rsl_to_text":

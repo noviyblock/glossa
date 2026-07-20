@@ -90,6 +90,20 @@ class _HomePageState extends State<HomePage> {
   Timer? _animTimer;          // 30fps render tick
   Timer? _hideSkeletonTimer;  // 500ms holdout before hiding skeleton
 
+  // Last fully-recognized gesture's own frames (from cv_service's
+  // 'gesture_keypoints', raw/pre-normalizer, same [0,1]-ish coordinates as
+  // the live per-frame skeleton) — scrubbable via a slider in
+  // _skeletonPanel instead of only ever showing whatever the current live
+  // frame happens to be, which stopped being representative within about a
+  // second of the gesture ending (especially for an uploaded video that
+  // then just sits on its last, often static, frame).
+  List<List<List<double>>> _recognizedGestureFrames = [];
+  int _recognizedGestureFrameIdx = 0;
+  // True while showing a completed gesture's frames instead of the live
+  // per-frame feed -- cleared as soon as a new gesture starts (gestureActive
+  // flips true again), so live tracking resumes for the next sign.
+  bool _reviewingGesture = false;
+
   // Skeleton playback of typed text->RSL glosses (see _skeletonPanel) —
   // separate from the live-camera path above: these are pre-recorded
   // frames from a real gesture example (services/tts_service/skeleton.py),
@@ -121,6 +135,13 @@ class _HomePageState extends State<HomePage> {
   // services/tts_service/video.py::SignVideoAssembler).
   String? _signVideoB64;
   final _glossScrollCtrl = ScrollController();
+
+  // ── Mic input (ASR) ──────────────────────────────────────────────────────── //
+  web.MediaStream? _micStream;
+  web.MediaRecorder? _micRecorder;
+  final List<web.Blob> _micChunks = [];
+  bool _micRecording = false;
+  bool _micProcessing = false;
 
   final _sessionId = const Uuid().v4();
 
@@ -394,12 +415,35 @@ class _HomePageState extends State<HomePage> {
         final personDetected = payload['person_detected'] as bool? ?? false;
         final gestureActive = payload['gesture_active'] as bool? ?? false;
         final isPreview = payload['preview'] as bool? ?? false;
+
+        // A new gesture starting means the previous one is no longer
+        // "current" -- resume live tracking instead of leaving the last
+        // gesture's frames on screen forever.
+        if (gestureActive) _reviewingGesture = false;
+
+        // Just-completed gesture's own frames, if this message carries them
+        // (cv_service only includes this on the final, non-preview
+        // classification) -- freeze the skeleton panel on them instead of
+        // the live per-frame feed, scrubbable via the slider in
+        // _skeletonPanel.
+        final rawGestureKp = payload['gesture_keypoints'] as List<dynamic>?;
+        if (rawGestureKp != null && rawGestureKp.isNotEmpty) {
+          _recognizedGestureFrames = rawGestureKp.map((frame) {
+            return (frame as List<dynamic>).map((p) {
+              final pts = p as List<dynamic>;
+              return [(pts[0] as num).toDouble(), (pts[1] as num).toDouble(), (pts[2] as num).toDouble()];
+            }).toList();
+          }).toList();
+          _recognizedGestureFrameIdx = 0;
+          _reviewingGesture = true;
+        }
+
         // Skeleton holdout: keep showing 500ms after person disappears (avoids flicker)
         if (personDetected) {
           _hideSkeletonTimer?.cancel();
           _hideSkeletonTimer = null;
           _showSkeleton = true;
-          if (kp != null) _targetKp = kp;
+          if (kp != null && !_reviewingGesture) _targetKp = kp;
         } else if (_showSkeleton && _hideSkeletonTimer == null) {
           _hideSkeletonTimer = Timer(const Duration(milliseconds: 500), () {
             if (mounted) setState(() { _showSkeleton = false; _targetKp = null; _displayKp = null; });
@@ -410,6 +454,9 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           _waitingForResponse = false; // Unblock next frame
           _gestureActive = gestureActive;
+          if (_reviewingGesture && _recognizedGestureFrames.isNotEmpty) {
+            _displayKp = _recognizedGestureFrames[_recognizedGestureFrameIdx];
+          }
           if (items.isNotEmpty) {
             _liveGlosses = items;
             _liveGlossesPreview = isPreview;
@@ -570,17 +617,25 @@ class _HomePageState extends State<HomePage> {
 
   // ── Text → RSL REST ──────────────────────────────────────────────────────── //
 
-  Future<void> _sendText() async {
-    final text = _textCtrl.text.trim();
+  // `override` lets mic input (_finishMicRecording) push transcribed text
+  // through the exact same translate call as typed text, instead of
+  // duplicating this method's body for a second input source.
+  Future<void> _sendText({String? override}) async {
+    final text = override ?? _textCtrl.text.trim();
     if (text.isEmpty) return;
-    _textCtrl.clear();
+    if (override == null) _textCtrl.clear();
     setState(() => _ttsProcessing = true);
     try {
-      final resp = await http.post(
-        Uri.parse('${Config.httpBase}/api/v1/translate'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'mode': 'text_to_rsl', 'text': text, 'session_id': _sessionId}),
-      );
+      final resp = await http
+          .post(
+            Uri.parse('${Config.httpBase}/api/v1/translate'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'mode': 'text_to_rsl', 'text': text, 'session_id': _sessionId}),
+          )
+          .timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        throw Exception('Сервер ответил ${resp.statusCode}');
+      }
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
       final glosses = data['translation'] as String? ?? '';
       final videoB64 = data['video_mp4'] as String?;
@@ -591,11 +646,108 @@ class _HomePageState extends State<HomePage> {
           _signVideoB64 = (videoB64 != null && videoB64.isNotEmpty) ? videoB64 : null;
         });
         _scrollToBottom(_glossScrollCtrl);
+      } else if (mounted) {
+        // Empty translation isn't a transport error (backend responded
+        // fine, NLP just returned nothing useful) -- still worth telling
+        // the user instead of leaving the panel looking like the button
+        // silently did nothing.
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Пустой ответ от сервера — перевод не получен')),
+        );
       }
       if (skeletonSeqs != null && skeletonSeqs.isNotEmpty) _playTextSkeleton(skeletonSeqs);
-    } catch (_) {
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось отправить: $e')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _ttsProcessing = false);
+    }
+  }
+
+  // ── Mic input (ASR) ──────────────────────────────────────────────────────── //
+  //
+  // Record -> POST /api/v1/asr (speech to text only) -> feed the transcript
+  // through _sendText() exactly as if it had been typed, so the rest of the
+  // text_to_rsl pipeline (NLP reverse, TTS audio+video+skeleton) isn't
+  // duplicated for this input source.
+  Future<void> _toggleMic() async {
+    if (_micRecording) {
+      _micRecorder?.stop();
+      return; // rest happens in the 'stop' listener set up below
+    }
+    try {
+      final stream = await web.window.navigator.mediaDevices
+          .getUserMedia(web.MediaStreamConstraints(audio: true.toJS))
+          .toDart;
+      _micStream = stream;
+      _micChunks.clear();
+      final recorder = web.MediaRecorder(stream);
+      const web.EventStreamProvider<web.BlobEvent>('dataavailable')
+          .forTarget(recorder)
+          .listen((e) => _micChunks.add(e.data));
+      const web.EventStreamProvider<web.Event>('stop')
+          .forTarget(recorder)
+          .listen((_) => _finishMicRecording());
+      recorder.start();
+      _micRecorder = recorder;
+      if (mounted) setState(() => _micRecording = true);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Микрофон недоступен: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _finishMicRecording() async {
+    _micStream?.getTracks().toDart.forEach((t) => t.stop());
+    _micStream = null;
+    _micRecorder = null;
+    if (mounted) setState(() { _micRecording = false; _micProcessing = true; });
+
+    try {
+      if (_micChunks.isEmpty) return;
+      final blob = _micChunks.length == 1
+          ? _micChunks.first
+          : web.Blob(_micChunks.map((b) => b as web.BlobPart).toList().toJS);
+      final buffer = await blob.arrayBuffer().toDart;
+      final bytes = buffer.toDart.asUint8List();
+      final audioB64 = base64Encode(bytes);
+
+      final resp = await http
+          .post(
+            Uri.parse('${Config.httpBase}/api/v1/asr'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'audio': audioB64, 'session_id': _sessionId}),
+          )
+          .timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        throw Exception('Сервер ответил ${resp.statusCode}');
+      }
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final text = (data['text'] as String? ?? '').trim();
+      if (text.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Речь не распознана')),
+          );
+        }
+        return;
+      }
+      await _sendText(override: text);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Не удалось распознать речь: $e')),
+        );
+      }
+    } finally {
+      _micChunks.clear();
+      if (mounted) setState(() => _micProcessing = false);
     }
   }
 
@@ -914,6 +1066,7 @@ class _HomePageState extends State<HomePage> {
   // ── Panel 1b: Skeleton (own quadrant, not overlaid on the camera) ───────── //
 
   Widget _skeletonPanel(ColorScheme cs) {
+    final scrubbable = _reviewingGesture && _recognizedGestureFrames.length > 1;
     return ColoredBox(
       color: Colors.black,
       child: Stack(
@@ -937,10 +1090,44 @@ class _HomePageState extends State<HomePage> {
                 ),
               ]),
             ),
-          const Positioned(
+          Positioned(
             top: 6, left: 8,
-            child: Text('Точки жеста', style: TextStyle(color: Colors.white54, fontSize: 11)),
+            child: Text(
+              _reviewingGesture ? 'Распознанный жест' : 'Точки жеста',
+              style: const TextStyle(color: Colors.white54, fontSize: 11),
+            ),
           ),
+          // Frame-by-frame scrubber for the last recognized gesture --
+          // "жест состоит из нескольких кадров" (RSL signs are motion, not
+          // a single pose; letting someone step through the frames makes it
+          // possible to actually see what was recognized instead of just
+          // one static instant of it).
+          if (scrubbable)
+            Positioned(
+              bottom: 0, left: 0, right: 0,
+              child: Container(
+                color: Colors.black54,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                child: Row(children: [
+                  Text(
+                    '${_recognizedGestureFrameIdx + 1}/${_recognizedGestureFrames.length}',
+                    style: const TextStyle(color: Colors.white70, fontSize: 11),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: _recognizedGestureFrameIdx.toDouble(),
+                      min: 0,
+                      max: (_recognizedGestureFrames.length - 1).toDouble(),
+                      divisions: _recognizedGestureFrames.length - 1,
+                      onChanged: (v) => setState(() {
+                        _recognizedGestureFrameIdx = v.round();
+                        _displayKp = _recognizedGestureFrames[_recognizedGestureFrameIdx];
+                      }),
+                    ),
+                  ),
+                ]),
+              ),
+            ),
         ],
       ),
     );
@@ -1063,17 +1250,37 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
       const SizedBox(height: 6),
-      SizedBox(
-        height: 36,
-        child: FilledButton.icon(
-          onPressed: _ttsProcessing ? null : _sendText,
-          icon: _ttsProcessing
-              ? const SizedBox(width: 14, height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.send, size: 16),
-          label: const Text('Отправить', style: TextStyle(fontSize: 13)),
+      Row(children: [
+        SizedBox(
+          height: 36,
+          child: FilledButton.tonalIcon(
+            onPressed: _micProcessing ? null : _toggleMic,
+            icon: _micProcessing
+                ? const SizedBox(width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : Icon(_micRecording ? Icons.stop : Icons.mic, size: 16),
+            label: Text(_micRecording ? 'Стоп' : 'Микрофон', style: const TextStyle(fontSize: 13)),
+            style: _micRecording
+                ? FilledButton.styleFrom(
+                    backgroundColor: cs.error.withValues(alpha: 0.9), foregroundColor: cs.onError)
+                : null,
+          ),
         ),
-      ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: SizedBox(
+            height: 36,
+            child: FilledButton.icon(
+              onPressed: _ttsProcessing ? null : _sendText,
+              icon: _ttsProcessing
+                  ? const SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.send, size: 16),
+              label: const Text('Отправить', style: TextStyle(fontSize: 13)),
+            ),
+          ),
+        ),
+      ]),
     ]),
   );
 
@@ -1083,6 +1290,7 @@ class _HomePageState extends State<HomePage> {
     _animTimer?.cancel();
     _hideSkeletonTimer?.cancel();
     _textSkeletonTimer?.cancel();
+    _micStream?.getTracks().toDart.forEach((t) => t.stop());
     _rslSub?.cancel();
     _rslWs?.sink.close();
     _textCtrl.dispose();

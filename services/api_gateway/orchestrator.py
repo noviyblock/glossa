@@ -17,6 +17,7 @@ independent consumers can subscribe to pipeline events.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -47,9 +48,21 @@ _CONSUMER_GROUP     = "api-gateway"
 _CONSUMER_NAME      = "gateway-0"
 
 # Skip buffering when confidence is too low — usually means no person in
-# frame or random noise classified by the model.
-_MIN_CONFIDENCE = 0.15  # lowered for diagnostics; raise to 0.35+ in production
-_HISTORY_TURNS  = 2      # recent translated sentences given to the LLM as context
+# frame or random noise classified by the model. Raised from the earlier
+# diagnostics-only 0.15: real testing showed transitional hand movement
+# *between* two intended signs was regularly scoring 0.15-0.30 and getting
+# buffered as a spurious extra "gesture" alongside the real ones, which the
+# T9 sequence-disambiguation LLM then dutifully wove into the sentence
+# instead of ignoring -- the fix belongs here (don't let noise into the
+# buffer in the first place), not in the LLM prompt.
+_MIN_CONFIDENCE = 0.35
+# Recent dialogue turns given to the LLM as context — now shared across
+# BOTH directions (see process_frame's and translate_sync's history writes
+# below), tagged by speaker, so e.g. a hearing person's question can inform
+# disambiguation of the deaf person's answer and vice versa. 4 (not 2) to
+# keep roughly one full question+answer exchange in view, not just the
+# single most recent line from either side.
+_HISTORY_TURNS  = 4
 
 
 class Orchestrator:
@@ -131,6 +144,7 @@ class Orchestrator:
         person_detected: bool = cv_data.get("person_detected", False)
         gesture_active: bool = cv_data.get("gesture_active", False)
         is_preview: bool = cv_data.get("preview", False)
+        gesture_keypoints: list | None = cv_data.get("gesture_keypoints")
 
         # Preview classifications (early, provisional — segment keeps
         # accumulating) skip translation and session persistence entirely:
@@ -159,6 +173,7 @@ class Orchestrator:
         translation = ""
         pending_changed = False
 
+        wav_b64 = ""
         if glosses and confidence >= _MIN_CONFIDENCE:
             # A gesture just completed — buffer its top-3 candidates rather
             # than translating it in isolation.
@@ -166,7 +181,7 @@ class Orchestrator:
             last_gesture_ts = now
             pending_changed = True
             if len(pending_positions) >= MAX_SENTENCE_GLOSSES:
-                translation = await self._flush_sentence(session_id, pending_positions, history)
+                translation, wav_b64 = await self._flush_sentence(session_id, pending_positions, history)
                 pending_positions = []
         elif pending_positions and (now - last_gesture_ts) >= SENTENCE_PAUSE_SECONDS:
             # No new gesture this frame, but the pause since the last one is
@@ -174,7 +189,7 @@ class Orchestrator:
             # the FALLBACK path — most useful when the user isn't actively
             # watching/correcting the buffer; a client that IS watching can
             # pre-empt this via flush_pending_sentence()/delete_last_pending().
-            translation = await self._flush_sentence(session_id, pending_positions, history)
+            translation, wav_b64 = await self._flush_sentence(session_id, pending_positions, history)
             pending_positions = []
             pending_changed = True
 
@@ -185,10 +200,19 @@ class Orchestrator:
 
         # Persist session state, including a short rolling history for the
         # next call's context (only append non-empty, genuinely new turns).
-        if translation and (not history or history[-1] != translation):
-            history = [*history, translation][-_HISTORY_TURNS:]
+        # Tagged by speaker — "history" is shared with the text_to_rsl
+        # direction (see translate_sync) so a hearing person's question and
+        # a signer's answer inform each other's disambiguation, not just
+        # each direction's own past turns.
+        if translation and (not history or history[-1] != f"Жестикулирующий: {translation}"):
+            history = [*history, f"Жестикулирующий: {translation}"][-_HISTORY_TURNS:]
 
+        # Merge, not replace — text_to_rsl (translate_sync) writes to this
+        # same session_id's Redis blob too; a plain overwrite here would
+        # silently drop whatever fields it set between this session's own
+        # previous write and now.
         await self._set_session(session_id, {
+            **prior_session,
             "mode": "rsl_to_text",
             "last_translation": translation or prior_session.get("last_translation", ""),
             "last_glosses": glosses or prior_session.get("last_glosses", []),
@@ -198,15 +222,21 @@ class Orchestrator:
 
         result = {"glosses": glosses, "translation": translation, "confidence": confidence,
                   "keypoints": keypoints, "person_detected": person_detected,
-                  "gesture_active": gesture_active, "preview": False}
+                  "gesture_active": gesture_active, "preview": False,
+                  "wav_b64": wav_b64, "gesture_keypoints": gesture_keypoints}
         if pending_changed:
             result["pending_positions"] = pending_positions
         return result
 
     async def _flush_sentence(
         self, session_id: str, pending_positions: list[list[dict]], history: list[str],
-    ) -> str:
-        """Translate a full buffered gesture sequence in one LLM call."""
+    ) -> tuple[str, str]:
+        """Translate a full buffered gesture sequence in one LLM call, then
+        synthesize it to speech — a hearing person watching a signer
+        otherwise only ever sees text, never hears the translation.
+        Returns (translation, wav_b64); wav_b64 is "" on synthesis failure
+        (same graceful-degradation convention as _synthesize_audio, never
+        raises)."""
         try:
             nlp_resp = await self._http.post(
                 f"{NLP_SERVICE_URL}/translate_sequence_topk",
@@ -223,25 +253,27 @@ class Orchestrator:
             {"payload": json.dumps({"session_id": session_id, "translation": translation})},
             maxlen=500, approximate=True,
         )
-        return translation
+        wav_b64 = await self._synthesize_audio(session_id, translation)
+        return translation, wav_b64
 
     async def flush_pending_sentence(self, session_id: str) -> dict:
         """Explicit client-triggered "send now" — flushes pending_positions
         immediately, bypassing SENTENCE_PAUSE_SECONDS. No-op (empty
         translation) if the buffer is already empty.
 
-        Returns: {"translation": str, "pending_positions": []}
+        Returns: {"translation": str, "wav_b64": str, "pending_positions": []}
         """
         session = await self._get_session(session_id) or {}
         pending_positions: list[list[dict]] = list(session.get("pending_positions", []))
         history: list[str] = list(session.get("history", []))
 
         if not pending_positions:
-            return {"translation": "", "pending_positions": []}
+            return {"translation": "", "wav_b64": "", "pending_positions": []}
 
-        translation = await self._flush_sentence(session_id, pending_positions, history)
-        if translation and (not history or history[-1] != translation):
-            history = [*history, translation][-_HISTORY_TURNS:]
+        translation, wav_b64 = await self._flush_sentence(session_id, pending_positions, history)
+        tagged = f"Жестикулирующий: {translation}"
+        if translation and (not history or history[-1] != tagged):
+            history = [*history, tagged][-_HISTORY_TURNS:]
 
         await self._set_session(session_id, {
             **session,
@@ -249,7 +281,7 @@ class Orchestrator:
             "history": history,
             "pending_positions": [],
         })
-        return {"translation": translation, "pending_positions": []}
+        return {"translation": translation, "wav_b64": wav_b64, "pending_positions": []}
 
     # ── Downstream calls with built-in graceful degradation ─────────────────
     #
@@ -350,6 +382,28 @@ class Orchestrator:
 
     # ── Pipeline: Text → RSL ──────────────────────────────────────────────── #
 
+    async def transcribe(self, session_id: str, audio_b64: str) -> str:
+        """Speech to text only (ASR /transcribe) -- separate from
+        process_audio's full ASR->NLP->TTS pipeline so the REST mic-input
+        flow (see api_gateway/main.py's POST /api/v1/asr) can hand the
+        transcribed text to the EXACT SAME translate_sync("text_to_rsl", ...)
+        path typed text already goes through, instead of duplicating the
+        NLP/TTS/video/skeleton orchestration a second time for the WS-only
+        audio_chunk path. Raises RuntimeError on failure (same convention
+        as process_frame's CV call) -- unlike the TTS-side helpers, there's
+        nothing useful to return on failure, the whole point was the text.
+        """
+        try:
+            resp = await self._http.post(
+                f"{ASR_SERVICE_URL}/transcribe",
+                json={"data": audio_b64, "session_id": session_id},
+            )
+            resp.raise_for_status()
+            return resp.json().get("text", "").strip()
+        except Exception as exc:
+            logger.error("ASR service error session=%s: %s", session_id, exc)
+            raise RuntimeError(f"ASR service unavailable: {exc}") from exc
+
     async def process_audio(self, session_id: str, audio_b64: str) -> dict:
         """Send audio through ASR → NLP-reverse → TTS.
 
@@ -394,22 +448,34 @@ class Orchestrator:
             maxlen=500, approximate=True,
         )
 
-        # 3. TTS service — synthesize Russian text to audio
-        wav_b64 = await self._synthesize_audio(session_id, russian_text)
-
-        # 4. TTS service — render gloss_sequence as concatenated sign clips.
-        video_b64 = await self._render_sign_video(session_id, gloss_sequence)
-
-        # 5. TTS service — render gloss_sequence as skeleton keypoint
-        # sequences (see clients/web's _skeletonPanel playback).
-        skeleton_sequences = await self._render_skeleton_sequence(session_id, gloss_sequence)
+        # 3-5. TTS service calls are independent of each other (all just
+        # need russian_text/gloss_sequence) -- run concurrently instead of
+        # one after another. This mattered more once skeleton_sequence (a
+        # third sequential TTS round-trip) was added on top of audio+video;
+        # sequentially that's up to 3x the latency for no reason.
+        wav_b64, video_b64, skeleton_sequences = await asyncio.gather(
+            self._synthesize_audio(session_id, russian_text),
+            self._render_sign_video(session_id, gloss_sequence),
+            self._render_skeleton_sequence(session_id, gloss_sequence),
+        )
 
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         logger.info("text_to_rsl latency=%.1fms session=%s", latency_ms, session_id)
 
+        # Shared dialogue history with the rsl_to_text direction (see
+        # process_frame) — tagged by speaker so the LLM disambiguating a
+        # signer's next gesture can see what the hearing person just asked.
+        prior_session = await self._get_session(session_id) or {}
+        history: list[str] = list(prior_session.get("history", []))
+        tagged = f"Слышащий: {russian_text}"
+        if russian_text and (not history or history[-1] != tagged):
+            history = [*history, tagged][-_HISTORY_TURNS:]
+
         await self._set_session(session_id, {
+            **prior_session,
             "mode": "text_to_rsl", "last_text": russian_text,
             "last_gloss_sequence": gloss_sequence, "latency_ms": latency_ms,
+            "history": history,
         })
 
         return {"text": russian_text, "gloss_sequence": gloss_sequence,
@@ -451,9 +517,30 @@ class Orchestrator:
             # longer fails the whole REST request, it just returns whatever
             # partial content succeeded (echoed text, empty audio, no video).
             gloss_seq = await self._translate_reverse(session_id, text)
-            wav_b64 = await self._synthesize_audio(session_id, text)
-            video_b64 = await self._render_sign_video(session_id, gloss_seq)
-            skeleton_sequences = await self._render_skeleton_sequence(session_id, gloss_seq)
+            # Independent of each other -- run concurrently. This is the
+            # actual path the Flutter client's "Отправить" button uses (its
+            # text_to_rsl feature is REST, not the WS audio_chunk path) --
+            # sequentially awaiting audio+video+skeleton one after another
+            # made this request slow enough in practice to look like it was
+            # silently doing nothing.
+            wav_b64, video_b64, skeleton_sequences = await asyncio.gather(
+                self._synthesize_audio(session_id, text),
+                self._render_sign_video(session_id, gloss_seq),
+                self._render_skeleton_sequence(session_id, gloss_seq),
+            )
+
+            # Shared dialogue history with the rsl_to_text direction (see
+            # process_frame/_flush_sentence) — session_id ties both
+            # directions together when the same device/session is used for
+            # both roles, so a signer's next gesture can be disambiguated
+            # against what was just typed here.
+            prior_session = await self._get_session(session_id) or {}
+            history: list[str] = list(prior_session.get("history", []))
+            tagged = f"Слышащий: {text}"
+            if not history or history[-1] != tagged:
+                history = [*history, tagged][-_HISTORY_TURNS:]
+            await self._set_session(session_id, {**prior_session, "history": history})
+
             return {
                 "translation": gloss_seq,
                 "audio_wav": wav_b64,

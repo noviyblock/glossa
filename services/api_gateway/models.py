@@ -96,6 +96,17 @@ class TranslateResponse(BaseModel):
     cached: bool = False
 
 
+# ── REST /api/v1/asr — mic-input transcription only ─────────────────────────  #
+
+class AsrRequest(BaseModel):
+    audio: str          # base64 audio (any container ffmpeg can decode)
+    session_id: str = Field(default="")
+
+class AsrResponse(BaseModel):
+    text: str
+    latency_ms: float
+
+
 # ── Two-party call (see call_manager.py) ────────────────────────────────────  #
 
 class CallCreateRequest(BaseModel):
