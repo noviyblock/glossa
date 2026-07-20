@@ -96,13 +96,24 @@ class Orchestrator:
     async def delete_session(self, session_id: str) -> None:
         await self._redis.delete(f"gw:session:{session_id}")
 
-    async def end_recognition_session(self, session_id: str) -> None:
+    async def end_recognition_session(self, session_id: str) -> dict | None:
         """Called when a camera/video-upload recognition run ends (WS
         "end_session") — resets cv_service's per-frame state (see
         reset_cv_session) and clears this session's pending_positions/
         last_gesture_ts, so a gesture buffered-but-not-yet-flushed when the
         user stopped doesn't leak into a later, unrelated run using the
         same session_id.
+
+        If gestures WERE buffered but not yet translated, they're flushed
+        now (via flush_pending_sentence) instead of just being cleared —
+        real regression: a video-upload almost always ends abruptly right
+        when the clip finishes, well before SENTENCE_PAUSE_SECONDS would
+        naturally elapse and with no manual "flush" click possible, so
+        whatever gestures were recognized during the upload were silently
+        discarded and the client never got a translated result at all
+        ("клипы при загрузке распознаются, но нигде не выводится").
+        Returns the flush result dict (see flush_pending_sentence) if
+        anything was pending, else None — caller sends it to the client.
 
         Deliberately does NOT touch/clear "history" — dialogue context is
         conversation-level (see process_frame's and translate_sync's
@@ -115,10 +126,15 @@ class Orchestrator:
         """
         await self.reset_cv_session(session_id)
         session = await self._get_session(session_id)
-        if session and (session.get("pending_positions") or session.get("last_gesture_ts")):
-            await self._set_session(session_id, {
-                **session, "pending_positions": [], "last_gesture_ts": 0.0,
-            })
+        if not session:
+            return None
+        flush_result = None
+        if session.get("pending_positions"):
+            flush_result = await self.flush_pending_sentence(session_id)
+            session = await self._get_session(session_id) or session
+        if session.get("last_gesture_ts"):
+            await self._set_session(session_id, {**session, "last_gesture_ts": 0.0})
+        return flush_result
 
     async def reset_cv_session(self, session_id: str) -> None:
         """Tell cv_service to drop this session_id's GestureSegmenter/

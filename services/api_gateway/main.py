@@ -434,7 +434,23 @@ async def ws_translate(ws: WebSocket, mode: str):
                     # leaving stale mid-gesture state for up to 5 minutes
                     # (SESSION_IDLE_TTL) for the next unrelated run reusing
                     # the same session_id to inherit.
-                    await _orchestrator.end_recognition_session(session_id)
+                    #
+                    # end_recognition_session also flushes any gestures
+                    # still buffered when the session ended (e.g. a
+                    # video-upload clip simply finishing, with no time for
+                    # SENTENCE_PAUSE_SECONDS or a manual flush) -- send
+                    # that result now, same shape as the manual
+                    # "flush_sentence" path, or it would otherwise never
+                    # reach the client at all.
+                    flush_result = await _orchestrator.end_recognition_session(session_id)
+                    if flush_result and flush_result.get("translation"):
+                        translation = flush_result["translation"]
+                        await _send("chunk", {"text": translation, "is_final": False})
+                        await _send("result", {"text": translation, "confidence": 1.0})
+                        wav_b64 = flush_result.get("wav_b64")
+                        if wav_b64:
+                            await _send("audio", {"wav": wav_b64})
+                        await _relay_to_peer({"text": translation, "audio": wav_b64 or None})
                 break
 
             elif msg_type == "ping":

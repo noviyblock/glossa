@@ -12,12 +12,17 @@ class GlossVocabulary:
     within (see punch-list follow-up: "RAG-глоссарий для домена в
     translate_reverse"). Loaded once at Translator startup, used two ways:
 
-    1. `prompt_list()` — the full word list embedded directly in the
-       reverse-translation system prompt. 200 short phrases fit easily in
-       a small model's context window, so there's no need for real
-       embedding-based retrieval over a corpus this size — the "retrieval
-       corpus" for this RAG-lite IS the whole vocabulary, every time.
-    2. `constrain()` — a deterministic post-filter applied to whatever the
+    1. `prompt_list()` — the full word list, for callers that genuinely
+       want everything (kept for tests/introspection).
+    2. `candidates()` — a cheap lexical pre-filter: vocabulary entries
+       plausibly related to a given input text (exact phrase/substring
+       match, or a shared-prefix fuzzy match per word to survive Russian
+       inflection). Used to shrink the reverse-translation prompt down
+       from all 200 entries to just the handful actually worth showing
+       the model — shorter prompt (faster prefill on CPU) and a small
+       model has an easier time complying with "pick from this list" when
+       the list is 10-30 items instead of 200.
+    3. `constrain()` — a deterministic post-filter applied to whatever the
        LLM actually outputs, dropping anything that doesn't literally
        match a vocabulary entry. A prompt instruction alone isn't a
        guarantee, especially from a 1.5B model — this is the real
@@ -46,6 +51,52 @@ class GlossVocabulary:
 
     def prompt_list(self) -> str:
         return "\n".join(self._words)
+
+    def candidates(self, text: str, max_candidates: int = 30, min_shared_prefix: int = 5) -> list[str]:
+        """Vocabulary entries plausibly relevant to `text`. Two match
+        modes, either is enough:
+
+        - exact phrase: the whole normalized vocab entry appears verbatim
+          in the normalized input (catches fixed multi-word idioms like
+          "С днем рождения" used as-is).
+        - per-word prefix fuzzy match: an input word and a vocab word
+          share a long-enough prefix (catches simple inflection, e.g.
+          "бабочку" vs "бабочка" -- share "бабочк" -- without a real
+          morphology library).
+
+        Falls back to the full list if nothing matches at all, so the
+        model still gets a chance rather than an empty prompt.
+        """
+        # split on any non-word run (not just _PUNCT_RE) so hyphenated
+        # compounds like "галстук-бабочку" become two input words instead
+        # of merging into one -- matters here even though constrain()'s
+        # normalize is fine leaving gloss-side punctuation alone.
+        norm_text = " ".join(re.split(r"[^\w]+", text.lower(), flags=re.UNICODE)).strip()
+        input_words = [w for w in norm_text.split() if len(w) >= 3]
+        matched: list[str] = []
+        for word in self._words:
+            norm_word = self._normalize(word)
+            if not norm_word:
+                continue
+            if norm_word in norm_text:
+                matched.append(word)
+                continue
+            vocab_tokens = [t for t in norm_word.split() if len(t) >= 3]
+            if any(
+                self._shares_prefix(iw, vt, min_shared_prefix)
+                for iw in input_words for vt in vocab_tokens
+            ):
+                matched.append(word)
+        return matched[:max_candidates] if matched else self._words
+
+    @staticmethod
+    def _shares_prefix(a: str, b: str, min_shared: int) -> bool:
+        shared = 0
+        for ca, cb in zip(a, b):
+            if ca != cb:
+                break
+            shared += 1
+        return shared >= min(min_shared, len(a), len(b))
 
     def constrain(self, llm_output: str) -> str:
         """Keep only tokens/phrases from llm_output that literally match a

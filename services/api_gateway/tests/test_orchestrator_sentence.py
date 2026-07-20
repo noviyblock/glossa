@@ -186,3 +186,37 @@ async def test_delete_last_pending_on_empty_buffer_is_a_noop() -> None:
     remaining = await orch.delete_last_pending("s6")
 
     assert remaining == []
+
+
+@pytest.mark.asyncio
+async def test_end_recognition_session_flushes_buffered_but_unsent_sentence() -> None:
+    """Real regression: a video-upload's clip ends abruptly (WS
+    end_session) well before SENTENCE_PAUSE_SECONDS or MAX_SENTENCE_GLOSSES
+    would naturally flush the buffer -- whatever was recognized during the
+    upload used to be silently discarded (pending_positions just cleared),
+    so the client never got a translated result at all."""
+    above = _MIN_CONFIDENCE + 0.5
+    http = _CvHTTPClient([_cv_frame("бабочка", above)])
+    orch = Orchestrator(redis=_FakeRedis(), http=http)
+
+    result = await orch.process_frame("s7", "fake-frame-b64")
+    assert result["pending_positions"] == [[{"gloss": "бабочка", "prob": above}]]
+    assert http.nlp_calls == []  # not flushed yet -- only one gesture buffered
+
+    flush_result = await orch.end_recognition_session("s7")
+
+    assert flush_result is not None
+    assert flush_result["translation"] == "stub translation"
+    assert len(http.nlp_calls) == 1
+    assert http.nlp_calls[0]["positions"] == [[{"gloss": "бабочка", "prob": above}]]
+    session = await orch._get_session("s7")
+    assert session["pending_positions"] == []
+
+
+@pytest.mark.asyncio
+async def test_end_recognition_session_with_nothing_pending_is_a_noop() -> None:
+    orch = Orchestrator(redis=_FakeRedis(), http=_CvHTTPClient([]))
+
+    flush_result = await orch.end_recognition_session("s8")
+
+    assert flush_result is None

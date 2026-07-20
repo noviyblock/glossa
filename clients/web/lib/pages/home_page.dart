@@ -177,6 +177,16 @@ class _HomePageState extends State<HomePage> {
     _textSkeletonTimer = null;
     _reviewingGesture = false;
     _recognizedGestureFrames = [];
+    // Guard against a stuck flag from a previous session: _sendFrame()
+    // won't send anything while this is true, and it's only ever cleared
+    // by the 'gloss' WS response handler. If the previous session's last
+    // in-flight frame never got a reply before its WS was torn down (e.g.
+    // a video-upload's onEnded firing _stopCamera mid-request), it stays
+    // true forever and silently blocks every future _sendFrame() call --
+    // real regression: camera looked completely dead ("как будто сервис
+    // не работает") after switching from video-upload, even though the
+    // server-side session state was already correctly reset.
+    _waitingForResponse = false;
     try {
       // Ideal, not exact -- requests the higher resolution but falls back
       // gracefully to whatever the camera actually supports instead of
@@ -274,6 +284,7 @@ class _HomePageState extends State<HomePage> {
     _textSkeletonTimer = null;
     _reviewingGesture = false;
     _recognizedGestureFrames = [];
+    _waitingForResponse = false; // see _startCamera's comment on why
     try {
       final url = web.URL.createObjectURL(file);
       _videoObjectUrl = url;
@@ -405,11 +416,28 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _disconnectRslWs() {
-    _rslWs?.sink.add(jsonEncode({'type': 'end_session', 'session_id': _sessionId}));
-    _rslSub?.cancel();
-    _rslWs?.sink.close();
+    // Capture references before clearing the fields -- the actual close
+    // is delayed below, and by then a fresh _connectRslWs() call (e.g. the
+    // user immediately starting a new session) may have already
+    // overwritten _rslWs/_rslSub with a NEW connection. Closing/cancelling
+    // through the instance fields at that point would tear down the wrong
+    // (new) connection instead of this old one.
+    final ws = _rslWs;
+    final sub = _rslSub;
+    ws?.sink.add(jsonEncode({'type': 'end_session', 'session_id': _sessionId}));
     _rslWs = null;
+    _rslSub = null;
     if (mounted) setState(() => _rslStatus = _WsStatus.disconnected);
+    // Give the server a brief window to respond to end_session before the
+    // socket actually closes -- it may flush a buffered-but-not-yet-sent
+    // sentence and send a final 'result'/'audio' message back (see
+    // orchestrator.py's end_recognition_session), which closing
+    // immediately risked racing against the close frame and losing.
+    // `sub` (not yet cancelled) still delivers it to _onRslMessage.
+    Future.delayed(const Duration(milliseconds: 400), () {
+      sub?.cancel();
+      ws?.sink.close();
+    });
   }
 
   void _onRslMessage(dynamic raw) {

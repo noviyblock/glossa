@@ -73,23 +73,42 @@ SEQ_TOPK_SYSTEM_PROMPT = (
 # invention just produces confident-looking words nothing can render and
 # that were never actually said (see punch-list: "бабочка" ->
 # "бабочка приближается", "с днем рождения" -> "верный добрый друг").
-# {vocab} is filled in per-Translator-instance in __init__, once, from the
-# real vocabulary file, not hand-maintained here.
+#
+# {vocab}/{n} are filled in PER CALL (see translate_reverse), from
+# GlossVocabulary.candidates() rather than the full 200-word list every
+# time: embedding the whole vocabulary produced two real problems in
+# production (~19.7s latency from the long prefill, and the model falling
+# back to free paraphrase instead of following the instruction — a
+# constrained-selection instruction alone wasn't enough for a 1.5B model
+# without a matching demonstration of the format). The few-shot examples
+# below are static and self-contained (their own short example lists) —
+# they teach the FORMAT, independent of whatever the real per-call
+# candidate list looks like.
 REVERSE_SYSTEM_PROMPT_TEMPLATE = (
     "Ты — переводчик русского жестового языка (РЖЯ). "
-    "У тебя есть строго ограниченный словарь из {n} глосс (жестов) РЖЯ — "
-    "вот полный список, по одной глоссе на строку:\n"
+    "Тебе доступен ограниченный словарь глосс (жестов) РЖЯ. Твоя задача — "
+    "НЕ пересказать или перефразировать предложение, а ВЫБРАТЬ из списка "
+    "только те глоссы, что по смыслу есть во входном предложении, и "
+    "вывести их через пробел, ЗАГЛАВНЫМИ буквами, ТОЧНО как написано в "
+    "списке (не изменяй и не склоняй), в порядке SOV "
+    "(субъект → объект → глагол).\n\n"
+    "Примеры (списки в примерах короткие и условные, ниже будет свой):\n"
+    "Список: ПРИВЕТ!, ПОКА, ФУТБОЛ\n"
+    "Предложение: Привет! Как твои дела сегодня?\n"
+    "Ответ: ПРИВЕТ!\n\n"
+    "Список: С ДНЕМ РОЖДЕНИЯ, БАБОЧКА, СМЕХ\n"
+    "Предложение: С Днем Рождения! Желаю тебе успехов и радости.\n"
+    "Ответ: С ДНЕМ РОЖДЕНИЯ\n\n"
+    "Список: ФУТБОЛ, СМЕХ\n"
+    "Предложение: Который час?\n"
+    "Ответ:\n\n"
+    "Если для какого-то смысла из предложения в списке НЕТ подходящей "
+    "глоссы — просто пропусти его. Не придумывай глосс, которых нет в "
+    "списке, и не перефразируй предложение своими словами. Если ни одна "
+    "глосса не подходит — верни пустую строку (как в третьем примере).\n\n"
+    "Твой список глосс ({n} шт., по одной на строку):\n"
     "{vocab}\n\n"
-    "Определи, какие из ЭТИХ глосс (и только из них) по смыслу присутствуют "
-    "во входном предложении. Выведи их через пробел, ЗАГЛАВНЫМИ буквами, "
-    "в порядке SOV (субъект → объект → глагол), используя ТОЧНОЕ написание "
-    "из списка выше — не изменяй его и не склоняй.\n"
-    "ВАЖНО: если для какого-то смысла из предложения в списке НЕТ "
-    "подходящей глоссы — просто пропусти его. Не придумывай глосс, "
-    "которых нет в списке выше, даже если кажется, что похожее слово "
-    "должно быть.\n"
-    "Отвечай ТОЛЬКО глоссами через пробел, без пояснений. Если ни одна "
-    "глосса из списка не подходит — верни пустую строку."
+    "Отвечай ТОЛЬКО глоссами через пробел из списка выше, без пояснений."
 )
 
 _CHINESE_RE = re.compile(r"[一-鿿]+")
@@ -117,9 +136,6 @@ class Translator:
         # crash on every call or silently fall back to unconstrained free
         # generation, the exact hallucination problem this exists to fix.
         self._vocab = GlossVocabulary(class_map_path)
-        self._reverse_system_prompt = REVERSE_SYSTEM_PROMPT_TEMPLATE.format(
-            n=len(self._vocab.words), vocab=self._vocab.prompt_list(),
-        )
         logger.info("GlossVocabulary loaded: %d glosses from %s", len(self._vocab.words), class_map_path)
 
         # bandit B615 (unpinned Hub revision) doesn't apply here: model_path
@@ -200,16 +216,26 @@ class Translator:
 
     def translate_reverse(self, russian_text: str) -> str:
         """Russian sentence → RSL gloss sequence (SOV, uppercase), grounded
-        in the actual 200-word vocabulary. The prompt (see
-        REVERSE_SYSTEM_PROMPT_TEMPLATE, built once in __init__) instructs
-        the model to only pick from that list, but constrain() is the real
-        guarantee -- it deterministically drops anything the model output
-        that isn't a literal vocabulary match, rather than trusting a
-        small model to follow the instruction perfectly every time."""
-        raw = self.generate(self._reverse_system_prompt, russian_text)
+        in the actual 200-word vocabulary. The prompt is built PER CALL
+        from GlossVocabulary.candidates(russian_text) -- a short, lexically
+        relevant subset, not the full 200-word list every time (see
+        REVERSE_SYSTEM_PROMPT_TEMPLATE's comment for why: latency and
+        small-model compliance both suffered with the full list embedded
+        every call). constrain() remains the real guarantee regardless --
+        it deterministically drops anything the model output that isn't a
+        literal vocabulary match, rather than trusting the model (or the
+        candidate prefilter) to be perfect."""
+        candidates = self._vocab.candidates(russian_text)
+        prompt = REVERSE_SYSTEM_PROMPT_TEMPLATE.format(
+            n=len(candidates), vocab="\n".join(candidates),
+        )
+        raw = self.generate(prompt, russian_text)
         constrained = self._vocab.constrain(raw)
         if raw.strip() and not constrained:
-            logger.info("translate_reverse: model output %r matched no vocabulary entry", raw[:80])
+            logger.info(
+                "translate_reverse: model output %r matched no vocabulary entry (candidates=%d)",
+                raw[:80], len(candidates),
+            )
         return constrained
 
     def translate_sequence_topk(

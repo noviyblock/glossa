@@ -86,3 +86,51 @@ def test_prompt_list_contains_every_word_one_per_line(tmp_path: Path) -> None:
 
     assert "привет" in listing.splitlines()
     assert "пока" in listing.splitlines()
+
+
+def test_candidates_matches_fixed_phrase_and_inflected_word(tmp_path: Path) -> None:
+    """Real production case: 'С Днем Рождения! Надень галстук-бабочку' ->
+    the 200-word prompt made the model paraphrase instead of selecting
+    (translate_reverse latency=19745.0ms, output matched no vocabulary
+    entry). candidates() should retrieve both relevant entries from a
+    larger vocabulary, exact-phrase for the idiom and prefix-fuzzy for the
+    inflected "бабочку" -> "бабочка"."""
+    vocab = _make_vocab(tmp_path, {
+        "С днем рождения": 0, "бабочка": 1, "футбол": 2, "смех": 3, "белка": 4,
+    })
+
+    result = vocab.candidates("С Днем Рождения! Надень галстук-бабочку")
+
+    assert "С днем рождения" in result
+    assert "бабочка" in result
+    assert "футбол" not in result
+    assert "смех" not in result
+
+
+def test_candidates_ignores_short_word_false_positives(tmp_path: Path) -> None:
+    """A 2-letter vocab token like 'на' inside a longer phrase must not
+    fuzzy-match every input word that happens to start with those same two
+    letters (e.g. 'надень') -- would defeat the point of shrinking the
+    candidate list."""
+    vocab = _make_vocab(tmp_path, {"позвонить на сервис": 0, "бабочка": 1})
+
+    result = vocab.candidates("Надень галстук-бабочку")
+
+    assert "позвонить на сервис" not in result
+    assert "бабочка" in result
+
+
+def test_candidates_falls_back_to_full_list_when_nothing_matches(tmp_path: Path) -> None:
+    vocab = _make_vocab(tmp_path, {"футбол": 0, "смех": 1})
+
+    result = vocab.candidates("совершенно не связанный текст")
+
+    assert result == vocab.words
+
+
+def test_candidates_respects_max_candidates(tmp_path: Path) -> None:
+    vocab = _make_vocab(tmp_path, {f"тест{i}": i for i in range(10)})
+
+    result = vocab.candidates("тест0 тест1 тест2", max_candidates=2)
+
+    assert len(result) == 2
