@@ -85,6 +85,11 @@ class _HomePageState extends State<HomePage> {
   DateTime? _lastFrameSent;
   // Prevents frame queue buildup: only one frame in-flight at a time
   bool _waitingForResponse = false;
+  // Completed by _onRslMessage's 'gloss' case when a response arrives --
+  // lets _driveVideoFileFrames() await a specific frame's round trip
+  // instead of only the soft _waitingForResponse flag a periodic timer
+  // polls (see that method's docstring for why video-upload needs this).
+  Completer<void>? _frameAckCompleter;
   // Server-driven: gesture segmentation is automatic (hand-motion based)
   bool _gestureActive = false;
 
@@ -290,28 +295,67 @@ class _HomePageState extends State<HomePage> {
       _videoObjectUrl = url;
       _video = web.HTMLVideoElement()
         ..src = url
-        ..autoplay = true
+        ..autoplay = false
         ..muted = true
         ..loop = false;
-      try { await _video!.play().toDart; } catch (_) {}
-      // Stop automatically once the file finishes playing, same cleanup
-      // path as pressing "Стоп" on a live camera.
-      _video!.onEnded.listen((_) {
-        if (mounted && _cameraActive) _stopCamera();
-      });
+      // Need duration/videoWidth/videoHeight before extraction can seek
+      // meaningfully.
+      await _video!.onLoadedMetadata.first.timeout(
+        const Duration(seconds: 10),
+        onTimeout: () => web.Event('loadedmetadata-timeout'),
+      );
       _canvas = web.HTMLCanvasElement()..width = 1280..height = 720;
       if (mounted) setState(() => _cameraActive = true);
       await _connectRslWs();
-      // Real-time cadence (not "as fast as possible") -- GestureSegmenter's
-      // onset/offset thresholds and GESTURE_MIN_FRAMES/MAX_FRAMES are tuned
-      // against real hand-motion speed; feeding it frames faster than the
-      // video's own real-time playback would look like abnormally fast
-      // signing to the segmenter, same concern as the earlier session-wide
-      // discussion of segmentation timing.
-      _frameTimer = Timer.periodic(const Duration(milliseconds: 20), (_) => _sendFrame());
       _animTimer = Timer.periodic(const Duration(milliseconds: 33), _animateSkeleton);
+      unawaited(_driveVideoFileFrames());
     } catch (e) {
       if (mounted) setState(() => _cameraError = '$e');
+    }
+  }
+
+  // Sequentially seeks through the uploaded file and sends each sampled
+  // frame, awaiting cv-service's response before advancing to the next --
+  // decoupled from the video's own real-time playback duration.
+  //
+  // Real regression: the previous approach (autoplay + a 20ms
+  // Timer.periodic polling "whatever frame _video is currently showing")
+  // sampled the PLAYING video at whatever rate cv-service could keep up
+  // with (~5fps observed on this deployment's GPU -- see DIAG log timing
+  // analysis), far below a typical source video's native frame rate
+  // (25-30fps). Since the video kept advancing in real wall-clock time
+  // between polls regardless of whether the previous frame's response had
+  // come back yet, most of the actual gesture motion was silently
+  // skipped, not merely delayed -- a couple-second clip could easily lose
+  // the one continuous hand movement it contained. That's the real reason
+  // short uploads recognized nothing, on top of the segmenter-state and
+  // force-flush issues already fixed separately.
+  //
+  // Seeking guarantees every sampled instant of the source is actually
+  // captured and sent, at a rate bounded only by how fast the response
+  // comes back -- wall-clock processing time can now exceed the video's
+  // own duration, which is fine for an upload-and-wait flow (unlike live
+  // camera, where real-time IS the correct behavior and stays untouched,
+  // still driven by _sendFrame's fire-and-forget Timer.periodic).
+  Future<void> _driveVideoFileFrames() async {
+    const stepSeconds = 1 / 15;
+    final duration = _video?.duration ?? 0.0;
+    final hasFiniteDuration = duration.isFinite && duration > 0;
+    double t = 0.0;
+    while (mounted && _cameraActive && _isVideoFileSession) {
+      if (hasFiniteDuration && t > duration) break;
+      if (!hasFiniteDuration && t > 120) break; // sane cap if duration is unusable (e.g. Infinity)
+      _video!.currentTime = t;
+      await _video!.onSeeked.first.timeout(
+        const Duration(seconds: 2),
+        onTimeout: () => web.Event('seeked-timeout'),
+      );
+      if (!mounted || !_cameraActive || !_isVideoFileSession) break;
+      await _sendFrameAwaitResponse();
+      t += stepSeconds;
+    }
+    if (mounted && _cameraActive && _isVideoFileSession) {
+      _stopCamera(); // finished -- triggers end_session, flushes any trailing gesture
     }
   }
 
@@ -359,12 +403,14 @@ class _HomePageState extends State<HomePage> {
     setState(() => _displayKp = next);
   }
 
-  void _sendFrame() {
-    if (_video == null || _canvas == null || _rslStatus != _WsStatus.connected) return;
-    // Drop frame if previous one is still being processed (prevents queue buildup → latency spike)
-    if (_waitingForResponse) return;
+  // Captures the current _video frame into _canvas and returns it as a
+  // base64 JPEG, or null if there's nothing to capture. Shared by the
+  // fire-and-forget live-camera send path (_sendFrame) and the awaitable
+  // video-upload path (_sendFrameAwaitResponse).
+  String? _captureFrameB64() {
+    if (_video == null || _canvas == null) return null;
     final ctx = _canvas!.getContext('2d') as web.CanvasRenderingContext2D?;
-    if (ctx == null) return;
+    if (ctx == null) return null;
     // Center-crop (not stretch) the source video to the canvas's aspect
     // ratio before scaling. Canvas target is back to 1280x720 (see
     // _startCamera), same as the requested capture, so in the common case
@@ -391,10 +437,39 @@ class _HomePageState extends State<HomePage> {
       }
     }
     ctx.drawImage(_video!, sx, sy, sw, sh, 0, 0, cw, ch);
-    final b64 = _canvas!.toDataURL('image/jpeg', 0.85.toJS).split(',').last;
+    return _canvas!.toDataURL('image/jpeg', 0.85.toJS).split(',').last;
+  }
+
+  void _sendFrame() {
+    if (_video == null || _canvas == null || _rslStatus != _WsStatus.connected) return;
+    // Drop frame if previous one is still being processed (prevents queue buildup → latency spike)
+    if (_waitingForResponse) return;
+    final b64 = _captureFrameB64();
+    if (b64 == null) return;
     _lastFrameSent = DateTime.now();
     _waitingForResponse = true;
     _rslWs!.sink.add(jsonEncode({'type': 'video_frame', 'frame': b64, 'session_id': _sessionId}));
+  }
+
+  // Same wire protocol as _sendFrame, but AWAITS the server's response
+  // instead of relying on the next periodic timer tick to notice
+  // _waitingForResponse went back to false -- used by
+  // _driveVideoFileFrames() to pace itself strictly off the server's own
+  // throughput, one frame at a time. Times out rather than hanging forever
+  // if a response is lost (WS hiccup) -- resets _waitingForResponse itself
+  // in that case since no 'gloss' message will ever arrive to do it.
+  Future<void> _sendFrameAwaitResponse() async {
+    if (_video == null || _canvas == null || _rslStatus != _WsStatus.connected) return;
+    final b64 = _captureFrameB64();
+    if (b64 == null) return;
+    _lastFrameSent = DateTime.now();
+    _waitingForResponse = true;
+    final completer = Completer<void>();
+    _frameAckCompleter = completer;
+    _rslWs!.sink.add(jsonEncode({'type': 'video_frame', 'frame': b64, 'session_id': _sessionId}));
+    await completer.future.timeout(const Duration(seconds: 5), onTimeout: () {
+      _waitingForResponse = false;
+    });
   }
 
   // ── RSL WS ───────────────────────────────────────────────────────────────── //
@@ -516,6 +591,9 @@ class _HomePageState extends State<HomePage> {
             _latencyMs = DateTime.now().difference(_lastFrameSent!).inMilliseconds;
           }
         });
+        if (_frameAckCompleter != null && !_frameAckCompleter!.isCompleted) {
+          _frameAckCompleter!.complete();
+        }
         break;
 
       case 'result':
@@ -1614,7 +1692,20 @@ class _CameraView extends StatelessWidget {
       tagName: 'video',
       onElementCreated: (element) {
         final v = element as web.HTMLVideoElement;
-        v.srcObject = videoElement.srcObject;
+        // Live camera sets srcObject (a MediaStream); an uploaded file
+        // sets src (an object URL) instead -- srcObject stays null in
+        // that case, so without this branch the panel showed nothing at
+        // all during video-upload (the offscreen extraction element still
+        // worked fine for capture, this clone is display-only). This
+        // clone plays the file normally in real time for the user to
+        // watch -- independent of the offscreen element's own seek-driven
+        // pace (see _driveVideoFileFrames), which is deliberately NOT
+        // real-time.
+        if (videoElement.srcObject != null) {
+          v.srcObject = videoElement.srcObject;
+        } else {
+          v.src = videoElement.src;
+        }
         v.autoplay = true;
         v.muted = true;
         v.style.width = '100%';
