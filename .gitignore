@@ -4,6 +4,7 @@ diploma_text.txt
 # Project description / presentation writeups for defense/evaluation (local only, not shipped)
 PROJECT_DESCRIPTION.md
 PRESENTATION_TEXT.md
+generate_metric_charts.py
 
 # Session working notes / scratch analysis -- audit findings, calibration
 # protocols, ad-hoc dumps -- meant to inform in-session decisions, not to
